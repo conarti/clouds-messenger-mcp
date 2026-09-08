@@ -1,0 +1,42 @@
+{
+  "$comment": "Полный пример ~/.config/clouds-messenger-mcp/config.json: все секции и все поля со значениями по умолчанию. Файл целиком опционален, без него сервер работает ровно на этих значениях, а переопределять можно точечно любую секцию и любое поле. Пути в paths обязаны быть абсолютными: относительный путь загрузчик не резолвит. Поле paths.configFile отчитывается о фактически прочитанном файле и содержимым самого файла не переопределяется. Путь до этого файла задаётся переменной окружения CLOUDS_MESSENGER_MCP_CONFIG, уровень лога переменной CLOUDS_MESSENGER_MCP_LOG_LEVEL.",
+  "protocol": {
+    "webOrigin": "https://clouds.org.ru",
+    "restBaseUrl": "https://cts01.clouds.org.ru/api",
+    "wsUrl": "wss://cts01.clouds.org.ru/socket/user/websocket",
+    "wsVsn": "1.0.0",
+    "wsVersion": 6,
+    "chatListRequestVersion": 6,
+    "threadListRequestVersion": 2,
+    "kdcKeysPath": "/v1/kdc/keys/",
+    "fileServicePath": "/v2/file_service/files/groupchat_file/",
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+  },
+  "paths": {
+    "configFile": "/home/user/.config/clouds-messenger-mcp/config.json",
+    "profileDir": "/home/user/.config/clouds-messenger-mcp/profile",
+    "downloadsDir": "/home/user/.config/clouds-messenger-mcp/downloads"
+  },
+  "downloads": {
+    "ttlDays": 7,
+    "maxFileSizeBytes": 268435456
+  },
+  "limits": {
+    "listChatsDefaultLimit": 50,
+    "searchDefaultLimit": 50,
+    "historyDefaultLimit": 50
+  },
+  "auth": {
+    "headlessTimeoutMs": 30000,
+    "headedTimeoutMs": 300000
+  },
+  "ws": {
+    "authenticateTimeoutMs": 10000,
+    "authenticateAttempts": 2,
+    "requestTimeoutMs": 30000,
+    "reconnectAttempts": 5,
+    "reconnectBaseDelayMs": 500,
+    "reconnectMaxDelayMs": 10000,
+    "heartbeatIntervalMs": 30000
+  }
+}

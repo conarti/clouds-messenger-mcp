@@ -1,0 +1,50 @@
+{
+  "name": "clouds-messenger-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for Clouds messenger (eXpress white-label)",
+  "homepage": "https://github.com/conarti/clouds-messenger-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/conarti/clouds-messenger-mcp/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/conarti/clouds-messenger-mcp.git"
+  },
+  "type": "module",
+  "bin": {
+    "clouds-messenger-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && chmod +x dist/index.js",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "verify:package": "node scripts/verify-package.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "libsodium-wrappers-sumo": "^0.8.4",
+    "playwright": "^1.63.0",
+    "ws": "^8.21.3",
+    "zod": "^4.5.4"
+  },
+  "devDependencies": {
+    "@semantic-release/changelog": "^7.0.0",
+    "@semantic-release/commit-analyzer": "^13.0.1",
+    "@semantic-release/git": "^11.0.1",
+    "@semantic-release/github": "^12.0.9",
+    "@semantic-release/npm": "^13.1.5",
+    "@semantic-release/release-notes-generator": "^14.1.1",
+    "@types/node": "^26.5.0",
+    "@types/ws": "^8.18.1",
+    "semantic-release": "^25.0.9",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.0"
+  }
+}

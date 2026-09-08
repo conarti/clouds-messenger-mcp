@@ -1,0 +1,42 @@
+name: Release
+
+# Релиз только с main: любая другая ветка не должна двигать версию на npm.
+on:
+  push:
+    branches:
+      - main
+
+# Права на уровне workflow минимальные, расширяются точечно в job.
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      # contents: write нужен плагину git (коммит CHANGELOG.md и package.json) и
+      # плагину github (создание тега и релиза); issues и pull-requests нужны тому же
+      # плагину github, он комментирует закрытые задачи ссылкой на релиз;
+      # id-token нужен npm для публикации с provenance.
+      contents: write
+      issues: write
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Полная история обязательна: semantic-release считает следующую версию
+          # по тегам и коммитам, на мелком клоне он их просто не увидит.
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # Сборка до semantic-release: плагин npm пакует уже готовый dist,
+      # своей сборки он не запускает.
+      - run: npm run build
+      - run: npx semantic-release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}

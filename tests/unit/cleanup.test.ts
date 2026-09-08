@@ -46,7 +46,7 @@ describe('sweepDownloads', () => {
 
   it('спускается в каталоги чатов и убирает опустевший каталог', async () => {
     const chatDirectory = join(root, '11111111-2222-4333-8444-555555555555');
-    const liveDirectory = join(root, '25c467fc-ad3d-5524-8455-4613a346d0cc');
+    const liveDirectory = join(root, '22222222-3333-4444-8555-666666666666');
     await mkdir(chatDirectory);
     await mkdir(liveDirectory);
     await makeFile(join(chatDirectory, 'старый.bin'), 30);
@@ -57,7 +57,7 @@ describe('sweepDownloads', () => {
 
     expect(result.removed).toBe(2);
     expect(result.kept).toBe(1);
-    expect(await readdir(root)).toEqual(['25c467fc-ad3d-5524-8455-4613a346d0cc']);
+    expect(await readdir(root)).toEqual(['22222222-3333-4444-8555-666666666666']);
     expect(await readdir(liveDirectory)).toEqual(['свежий.bin']);
   });
 

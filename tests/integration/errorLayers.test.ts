@@ -15,9 +15,9 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import sodium from 'libsodium-wrappers-sumo';
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import type { KeyMaterial } from '../../src/auth/AuthProvider.js';
+import { AuthError, type KeyMaterial } from '../../src/auth/AuthProvider.js';
 import { FakeAuthProvider, createFakeKeyMaterial } from '../../src/auth/FakeAuthProvider.js';
-import { AuthKeyStore } from '../../src/auth/keyStore.js';
+import { AuthKeyStore, type KeyStore } from '../../src/auth/keyStore.js';
 import { SodiumCryptoService } from '../../src/crypto/service.js';
 import type { GetHistoryResult } from '../../src/mcp/tools/getHistory.js';
 import { CHAT_LIST_EVENT } from '../../src/protocol/chatList.js';
@@ -53,6 +53,8 @@ let historyEvents: Record<string, unknown>[];
 let historyBehavior: HistoryBehavior;
 /** Статус ответа KDC: им проверяется слой rest на пути расшифровки */
 let kdcStatus: number;
+/** Отказ авторизации на пути ключа: им проверяется транзиентность слоя client по коду auth_* */
+let keyStoreAuthFailure: boolean;
 
 const CHATS = [makeRawChat({ chatId: POLYGON_CHAT_ID, name: 'Избранное', chatType: 'notes' })];
 
@@ -135,6 +137,7 @@ beforeAll(async () => {
 beforeEach(async () => {
   historyBehavior = 'ok';
   kdcStatus = 200;
+  keyStoreAuthFailure = false;
   historyEvents = [await makeEvent(ring.sender.privateKey)];
   mock = await startMockPhoenix();
 
@@ -172,7 +175,20 @@ beforeEach(async () => {
   ws = new PhoenixWsClient({ auth, config, logger });
   const rest = new HttpRestClient({ auth, config, logger, fetchImplementation: kdcFetch() });
   const crypto = new SodiumCryptoService({ rest, logger });
-  const keyStore = new AuthKeyStore(auth);
+  const baseKeyStore = new AuthKeyStore(auth);
+  /*
+   * Обёртка вместо прямого AuthKeyStore: ею проверяется отказ авторизации на пути ключа,
+   * а не отказ подбора самого ключа, поэтому `match` не тронут и падает только `require`.
+   */
+  const keyStore: KeyStore = {
+    match: (keyId) => baseKeyStore.match(keyId),
+    require: async (keyId) => {
+      if (keyStoreAuthFailure) {
+        throw new AuthError('сессия устарела на пути ключа: профиль требует переподъёма', 'bearer');
+      }
+      return baseKeyStore.require(keyId);
+    },
+  };
 
   server = createServer({
     config,
@@ -234,6 +250,43 @@ describe('слой rest: отказ KDC на пути расшифровки', (
     expect(payload.messages[0]?.decrypt_error).toContain('[rest] 500');
     expect(payload.messages[0]?.decrypt_error).toContain('HTTP 500');
   });
+
+  /*
+   * Отказ службы ключей приезжает ВНУТРИ успеха, и без сводки его не отличить от чужого
+   * ключа: оба живут в том же поле того же сообщения. Разница между ними в том, что
+   * повтор вызова здесь осмыслен, поэтому она обязана быть машинно-читаемой.
+   */
+  it('сводка называет слой и объявляет отказ транзиентным с подсказкой повторить', async () => {
+    kdcStatus = 500;
+
+    const payload = await callTool<GetHistoryResult>('get_history', { chat: 'Избранное' });
+    if (payload.status !== 'ok') {
+      throw new Error('ожидалась успешная выдача');
+    }
+
+    expect(payload.decrypt_error_summary).toEqual({ count: 1, layers: ['rest'], transient: true });
+    expect(payload.next_step).toContain('повторите вызов позже');
+  });
+});
+
+describe('слой client: отказ авторизации на пути ключа транзиентен', () => {
+  /*
+   * Отказ авторизации живёт на том же слое client, что и чужой ключ читателя, но лечится
+   * иначе: не сменой ключей переписки, а переподъёмом профиля. Без кода auth_* сводка не
+   * отличила бы одно от другого и назвала бы лечащийся отказ нелечащимся.
+   */
+  it('сводка объявляет отказ транзиентным с подсказкой повторить, потому что переподъём профиля лечит устаревшую сессию', async () => {
+    keyStoreAuthFailure = true;
+
+    const payload = await callTool<GetHistoryResult>('get_history', { chat: 'Избранное' });
+    if (payload.status !== 'ok') {
+      throw new Error('ожидалась успешная выдача');
+    }
+
+    expect(payload.messages[0]?.decrypt_error).toContain('[client] auth_bearer');
+    expect(payload.decrypt_error_summary).toEqual({ count: 1, layers: ['client'], transient: true });
+    expect(payload.next_step).toContain('повторите вызов позже');
+  });
 });
 
 describe('слой client: отказ расшифровки не роняет страницу', () => {
@@ -251,6 +304,19 @@ describe('слой client: отказ расшифровки не роняет �
     expect(payload.messages[0]?.text).toBeUndefined();
   });
 
+  it('клиентский отказ транзиентным не объявляется и подсказки повторить не несёт', async () => {
+    historyEvents = [await makeEvent(ring.recipients[1].privateKey)];
+
+    const payload = await callTool<GetHistoryResult>('get_history', { chat: 'Избранное' });
+    if (payload.status !== 'ok') {
+      throw new Error('ожидалась успешная выдача');
+    }
+
+    /* Приватный ключ читателя от повтора не появится: обещать повтору успех было бы ложью */
+    expect(payload.decrypt_error_summary).toEqual({ count: 1, layers: ['client'], transient: false });
+    expect(Object.keys(payload)).not.toContain('next_step');
+  });
+
   it('нечитаемое событие не превращается в дыру: адрес и метки на месте', async () => {
     historyEvents = [await makeEvent(ring.recipients[1].privateKey)];
 
@@ -261,5 +327,15 @@ describe('слой client: отказ расшифровки не роняет �
 
     expect(payload.messages[0]?.chat_id).toBe(POLYGON_CHAT_ID);
     expect(payload.next_before).toBe(SYNC_ID);
+  });
+
+  it('на читаемой странице ключа сводки нет вовсе, а не count равный нулю', async () => {
+    const payload = await callTool<GetHistoryResult>('get_history', { chat: 'Избранное' });
+    if (payload.status !== 'ok') {
+      throw new Error('ожидалась успешная выдача');
+    }
+
+    expect(Object.keys(payload)).not.toContain('decrypt_error_summary');
+    expect(Object.keys(payload)).not.toContain('next_step');
   });
 });

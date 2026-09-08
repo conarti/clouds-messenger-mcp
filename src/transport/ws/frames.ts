@@ -13,6 +13,13 @@
  * даёт шанс увидеть смену формы протокола, вместо того чтобы утонуть в catch.
  */
 
+import {
+  AUTHENTICATE_EVENT,
+  HEARTBEAT_EVENT,
+  PHOENIX_TOPIC,
+  REPLY_EVENT,
+} from '../../config/wireEvents.js';
+
 /** Кадр Phoenix. `ref` равен null у кадров, инициированных сервером */
 export interface PhoenixFrame {
   topic: string;
@@ -24,13 +31,12 @@ export interface PhoenixFrame {
 /** Ответ разбора: либо кадр, либо причина отказа для лога */
 export type DecodeResult = { ok: true; frame: PhoenixFrame } | { ok: false; reason: string };
 
-/** Событие ответа Phoenix на запрос клиента */
-export const REPLY_EVENT = 'phx_reply';
-
-/** Топик служебных кадров: authenticate и heartbeat */
-export const PHOENIX_TOPIC = 'phoenix';
-export const AUTHENTICATE_EVENT = 'authenticate';
-export const HEARTBEAT_EVENT = 'heartbeat';
+/*
+ * Имена служебных событий и топиков живут в листовом модуле конфига и реэкспортируются
+ * отсюда: их читает и авторизация, которой незачем тянуть за собой транспорт целиком.
+ * Прежние имена сохранены, поэтому существующие импорты кодека не меняются.
+ */
+export { AUTHENTICATE_EVENT, HEARTBEAT_EVENT, PHOENIX_TOPIC, REPLY_EVENT };
 
 export interface ReplyPayload {
   status: 'ok' | 'error';

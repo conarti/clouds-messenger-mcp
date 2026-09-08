@@ -10,8 +10,13 @@
 import { encryptInnerEvent, type KeyPairFixture } from './cryptoFixtures.js';
 
 export const POLYGON_CHAT_ID = '11111111-2222-4333-8444-555555555555';
-export const OTHER_CHAT_ID = '25c467fc-ad3d-5524-8455-4613a346d0cc';
+export const OTHER_CHAT_ID = '22222222-3333-4444-8555-666666666666';
 export const MY_HUID = '33333333-3333-5333-8333-333333333333';
+
+/** Адрес события: `sync_id` это UUID, и порядковый номер делает фикстуры читаемыми глазами */
+export function syncId(index: number): string {
+  return `00000000-0000-4000-8000-${index.toString().padStart(12, '0')}`;
+}
 
 export interface RawChatInput {
   chatId: string;

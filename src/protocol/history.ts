@@ -23,7 +23,7 @@ import type { Logger } from '../util/logger.js';
 import { asObject, stringOr } from '../util/json.js';
 
 /** Префикс топика чата: история и отправка живут в топике конкретного чата */
-export const CHAT_TOPIC_PREFIX = 'groupchat:';
+const CHAT_TOPIC_PREFIX = 'groupchat:';
 export const EVENTS_HISTORY_EVENT = 'events_history';
 
 /** Направление обхода. `forward` взято из бандла веб-клиента и живьём не подтверждено */

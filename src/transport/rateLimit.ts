@@ -40,10 +40,10 @@ export const RATE_LIMIT_STATUS = 429;
 const RATE_LIMIT_CODES = ['rate_limited', 'too_many_requests'] as const;
 
 /** Как сырое значение было прочитано; уходит в лог, чтобы промах по единице был видим */
-export type PauseInterpretation = 'seconds' | 'milliseconds' | 'http-date' | 'invalid';
+type PauseInterpretation = 'seconds' | 'milliseconds' | 'http-date' | 'invalid';
 
 /** Как результат лёг в допустимый диапазон */
-export type PauseClamp = 'none' | 'min' | 'max';
+type PauseClamp = 'none' | 'min' | 'max';
 
 interface ResolvedPause {
   pauseMs: number;

@@ -22,6 +22,7 @@ import {
   makeHistoryEvent,
   makeInnerText,
   makeRawChat,
+  syncId,
 } from '../helpers/readFixtures.js';
 import { startToolServer, type ToolServer } from '../helpers/toolServer.js';
 
@@ -33,10 +34,6 @@ const CHATS = [
   makeRawChat({ chatId: OTHER_CHAT_ID, name: 'Дежурка', chatType: 'group_chat' }),
   makeRawChat({ chatId: PRIVATE_CHAT_ID, name: 'Личный', chatType: 'chat' }),
 ];
-
-function syncId(index: number): string {
-  return `00000000-0000-4000-8000-${index.toString().padStart(12, '0')}`;
-}
 
 /** Внутреннее событие опроса по форме из бандла: живьём такое событие не наблюдалось */
 function makeInnerPoll(): Record<string, unknown> {

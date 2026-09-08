@@ -18,6 +18,11 @@
  * записанный на диск испорченный файл хуже честного шифротекста. Поэтому байты кладутся как
  * есть, а выдача несёт `encrypted: true`.
  *
+ * АДРЕС ЧАТА ПРОВЕРЯЕТСЯ ДО СБОРКИ ПУТИ. Он приезжает из ответа сервера, а раскладка на
+ * диске строится подкаталогом с этим именем: значение вида `..` увело бы запись за пределы
+ * каталога загрузок. Поэтому адрес сверяется с образцом идентификатора протокола, и
+ * несовпадение это отказ ДО обращения к сети и до создания каталога, а не после.
+ *
  * ПОТОЛОК РАЗМЕРА ОБЯЗАТЕЛЕН. Заявленный размер приезжает из чужого сообщения, а реальная
  * длина ответа не обязана ему соответствовать, поэтому проверяются обе: заявленная до
  * запроса и фактическая по ходу записи.
@@ -28,6 +33,7 @@ import { AuthError, type AuthProvider } from '../auth/AuthProvider.js';
 import type { Config } from '../config/types.js';
 import type { Attachment } from '../protocol/attachments.js';
 import { MessengerError } from '../protocol/errors.js';
+import { UUID_PATTERN } from '../protocol/messageShape.js';
 import type { Logger } from '../util/logger.js';
 import { sweepDownloads } from './cleanup.js';
 
@@ -232,6 +238,16 @@ export async function downloadAttachment(
   const doFetch = deps.fetchImplementation ?? globalThis.fetch;
   const limitBytes = config.downloads.maxFileSizeBytes;
   const declaredSize = input.attachment.file_size;
+
+  if (!UUID_PATTERN.test(input.chatId)) {
+    throw new MessengerError({
+      layer: 'client',
+      code: 'invalid_chat_id',
+      detail:
+        'адрес чата не похож на идентификатор протокола, а из него строится путь на диске: ' +
+        'ни запроса, ни записи не будет',
+    });
+  }
 
   if (declaredSize !== undefined && declaredSize > limitBytes) {
     throw tooLarge(limitBytes, declaredSize);

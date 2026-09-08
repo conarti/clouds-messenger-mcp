@@ -53,8 +53,23 @@ const REDACTED_KEY_PARTS = [
  */
 const SECRET_LIKE_SEQUENCE = /[A-Za-z0-9+/=_.-]{60,}/;
 
+/**
+ * Имена, которые сравнение по подстроке ловит зря. `context` содержит `text` и потому
+ * вырезался целиком, хотя несёт не переписку, а имя окна вызова, то есть ровно ту
+ * диагностику, ради которой лог и читают. `component` стоит рядом: он приезжает тем же
+ * путём, привязками логгера, и защитить его заранее дешевле, чем однажды искать, куда
+ * делось имя подсистемы после очередного слова в словаре.
+ *
+ * Сравнение здесь ТОЧНОЕ, а не по подстроке: исключение из правила обязано быть уже
+ * самого правила, иначе `context_text` уехало бы наружу вместе с ним.
+ */
+const SAFE_KEYS: readonly string[] = ['context', 'component'];
+
 function isRedactedKey(key: string): boolean {
   const lower = key.toLowerCase();
+  if (SAFE_KEYS.includes(lower)) {
+    return false;
+  }
   return REDACTED_KEY_PARTS.some((part) => lower.includes(part));
 }
 

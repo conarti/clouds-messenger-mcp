@@ -13,12 +13,21 @@
  * а сама выведенная догадка обязательно ПРОВЕРЯЕТСЯ по списку тредов: несуществующий тред
  * лучше объявить ненайденным, чем прочитать историю по выдуманному адресу.
  *
- * ФОРМА ЭЛЕМЕНТА СПИСКА ТРЕДОВ И ФОРМА ИСТОРИИ ТРЕДА НАБЛЮДЕНЫ ЖИВЬЁМ, поэтому чтение по
- * готовому `thread_id` метки неподтверждённости не несёт.
+ * ФОРМА ЭЛЕМЕНТА СПИСКА ТРЕДОВ НАБЛЮДЕНА ЖИВЬЁМ, А СТРАНИЦА ТРЕДА НЕТ. Список тредов
+ * прочитан живой пробой; страница треда читается тем же путём, что и история чата, но
+ * живьём не подтверждена: в полигоне тредов нет. Поэтому чтение по готовому `thread_id`
+ * метки неподтверждённости не несёт, пока сервер присылает признак продолжения, а без
+ * него выдача честно объявляет неполноту.
  */
 import { resolveChat } from '../../chat/resolveChat.js';
 import { resolveFailure, type ChatResolveFailure } from '../../chat/resolveFailure.js';
-import { decryptHistoryEvents, toMessages } from '../../protocol/decryptHistory.js';
+import {
+  DECRYPT_RETRY_NEXT_STEP,
+  decryptHistoryEvents,
+  summarizeDecryptErrors,
+  toMessages,
+  type DecryptErrorSummary,
+} from '../../protocol/decryptHistory.js';
 import { enrichMessages, type EnrichedMessage } from '../../protocol/enrichMessage.js';
 import { fetchHistoryPage } from '../../protocol/history.js';
 import { findThread } from '../../protocol/threads.js';
@@ -50,6 +59,10 @@ export interface GetThreadOk {
   has_more?: boolean;
   form_status?: 'bundle' | 'unconfirmed';
   form_note?: string;
+  /** Есть, только если хоть одно событие страницы не расшифровалось */
+  decrypt_error_summary?: DecryptErrorSummary;
+  /** Есть, только если отказ транзиентный: тот же смысл, что и у `get_history` */
+  next_step?: string;
 }
 
 export interface ThreadNotFound {
@@ -126,7 +139,9 @@ export async function getThread(deps: ToolDeps, input: GetThreadInput): Promise<
    * Контекст чата в сообщениях треда это РОДИТЕЛЬСКИЙ чат: у треда своего имени нет, а
    * `chat_id` самого сообщения при этом равен адресу треда, потому что тред и есть его чат.
    */
-  const messages = enrichMessages(toMessages(await decryptHistoryEvents(deps, page.events)), chat);
+  const decrypted = await decryptHistoryEvents(deps, page.events);
+  const messages = enrichMessages(toMessages(decrypted), chat);
+  const decryptErrors = summarizeDecryptErrors(decrypted);
   const oldest = messages[0];
 
   const notes = [
@@ -139,6 +154,7 @@ export async function getThread(deps: ToolDeps, input: GetThreadInput): Promise<
     chatId: chat.chat_id,
     count: messages.length,
     derived,
+    decryptFailed: decryptErrors?.count ?? 0,
   });
 
   return {
@@ -150,5 +166,7 @@ export async function getThread(deps: ToolDeps, input: GetThreadInput): Promise<
     ...(oldest !== undefined ? { next_before: oldest.message_id } : {}),
     ...(page.hasMore !== undefined ? { has_more: page.hasMore } : {}),
     ...(formStatus !== undefined ? { form_status: formStatus, form_note: notes.join('; ') } : {}),
+    ...(decryptErrors !== undefined ? { decrypt_error_summary: decryptErrors } : {}),
+    ...(decryptErrors?.transient === true ? { next_step: DECRYPT_RETRY_NEXT_STEP } : {}),
   };
 }

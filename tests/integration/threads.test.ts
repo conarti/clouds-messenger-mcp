@@ -22,6 +22,7 @@ import {
   makeHistoryEvent,
   makeInnerText,
   makeRawChat,
+  syncId,
 } from '../helpers/readFixtures.js';
 import { startToolServer, type ToolServer } from '../helpers/toolServer.js';
 
@@ -34,10 +35,6 @@ const CHATS = [
   makeRawChat({ chatId: POLYGON_CHAT_ID, name: 'Избранное', chatType: 'notes' }),
   makeRawChat({ chatId: OTHER_CHAT_ID, name: 'Дежурка', chatType: 'group_chat' }),
 ];
-
-function syncId(index: number): string {
-  return `00000000-0000-4000-8000-${index.toString().padStart(12, '0')}`;
-}
 
 function rawThread(threadId: string, chatId: string): Record<string, unknown> {
   return {
@@ -153,6 +150,29 @@ describe('get_thread по готовому адресу треда', () => {
     expect(payload.has_more).toBe(false);
     expect(Object.keys(payload)).not.toContain('form_status');
     expect(payload.next_before).toBe(syncId(1));
+  });
+
+  it('сервер без признака продолжения истории треда даёт form_status:unconfirmed', async () => {
+    /* Тот же ответчик, но без has_more и has_more_events: страница треда живьём не подтверждена */
+    server.mock.respondTo(EVENTS_HISTORY_EVENT, (frame) => {
+      const payload = frame.payload as Record<string, unknown>;
+      const events = payload['group_chat_id'] === THREAD_ID ? threadEvents : [];
+      return { status: 'ok', response: { history: [...events].reverse() } };
+    });
+
+    const payload = await server.callTool<GetThreadResult>('get_thread', {
+      chat: 'Избранное',
+      thread_id: THREAD_ID,
+    });
+    if (payload.status !== 'ok') {
+      throw new Error('ожидалась успешная выдача');
+    }
+
+    expect(payload.thread_id).toBe(THREAD_ID);
+    expect(payload.messages.map((message) => message.message_id)).toEqual([syncId(1), syncId(2)]);
+    expect(payload.form_status).toBe('unconfirmed');
+    expect(payload.form_note).toContain('признак продолжения');
+    expect(Object.keys(payload)).not.toContain('has_more');
   });
 
   it('тред без событий это пустая выдача, а не отказ доступа', async () => {

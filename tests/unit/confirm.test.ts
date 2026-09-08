@@ -27,7 +27,7 @@ import {
 import { buildSendPayload, sendFingerprint } from '../../src/mcp/tools/sendMessage.js';
 
 const CHAT = '11111111-2222-4333-8444-555555555555';
-const OTHER_CHAT = '25c467fc-ad3d-5524-8455-4613a346d0cc';
+const OTHER_CHAT = '22222222-3333-4444-8555-666666666666';
 const SYNC_ID = '00000000-0000-4000-8000-000000000001';
 
 function makeToken(overrides: Partial<DraftToken> = {}): DraftToken {

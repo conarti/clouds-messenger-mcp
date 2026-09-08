@@ -15,8 +15,8 @@ import {
 export const FAKE_CTS_PUBLIC_KEY_ID = 'fake-cts-public-key-id';
 export const FAKE_RTS_PUBLIC_KEY_ID = 'fake-rts-public-key-id';
 export const FAKE_SIGN_PUBLIC_KEY_ID = 'fake-sign-public-key-id';
-export const FAKE_BEARER = 'fake-bearer';
-export const FAKE_COOKIE_HEADER = 'ctsAuthToken=fake-cts-auth-token; authToken=fake-auth-token';
+const FAKE_BEARER = 'fake-bearer';
+const FAKE_COOKIE_HEADER = 'ctsAuthToken=fake-cts-auth-token; authToken=fake-auth-token';
 export const FAKE_HUID = '00000000-0000-4000-8000-000000000000';
 
 /** Тело нужной длины из номера: значение предсказуемо и заведомо не является живым ключом */

@@ -18,7 +18,7 @@
 import { asObject, stringOr } from '../util/json.js';
 
 /** Значение `type` внутреннего события опроса (из бандла) */
-export const POLL_INNER_TYPE = 'poll';
+const POLL_INNER_TYPE = 'poll';
 
 /**
  * Виды чатов, где опроса не может быть в принципе: опрос это функция ГРУППОВОГО чата

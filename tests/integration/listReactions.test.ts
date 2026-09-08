@@ -20,14 +20,11 @@ import {
   makeHistoryEvent,
   makeInnerText,
   makeRawChat,
+  syncId,
 } from '../helpers/readFixtures.js';
 import { startToolServer, type ToolServer } from '../helpers/toolServer.js';
 
 const CHATS = [makeRawChat({ chatId: POLYGON_CHAT_ID, name: 'Избранное', chatType: 'notes' })];
-
-function syncId(index: number): string {
-  return `00000000-0000-4000-8000-${index.toString().padStart(12, '0')}`;
-}
 
 let ring: KeyRing;
 let server: ToolServer;

@@ -186,6 +186,18 @@ describe('downloadAttachment', () => {
     expect(await readdir(join(downloadsDir, POLYGON_CHAT_ID))).toHaveLength(2);
   });
 
+  it('адрес чата не по образцу протокола это отказ без запроса и без записи', async () => {
+    const deps = createDeps({ responses: [okResponse] });
+
+    await expect(
+      downloadAttachment(deps, { attachment, chatId: '../evil' }),
+    ).rejects.toBeInstanceOf(MessengerError);
+
+    /* Ни сети, ни диска: отказ случился до того, как путь вообще собрался */
+    expect(requests).toEqual([]);
+    expect(await readdir(downloadsDir)).toEqual([]);
+  });
+
   it('протухший bearer это повод обновиться и повторить ровно один раз', async () => {
     const deps = createDeps({
       responses: [() => new Response('', { status: 401 }), okResponse],

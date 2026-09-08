@@ -84,7 +84,7 @@ export interface CreateServerOptions {
 }
 
 /** Успешный результат: структурный JSON, его потребитель тут машина, а не человек */
-export function jsonResult(payload: unknown): CallToolResult {
+function jsonResult(payload: unknown): CallToolResult {
   return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };
 }
 
@@ -95,7 +95,7 @@ export function jsonResult(payload: unknown): CallToolResult {
  * делает `protocol/errors`, поэтому наружу уезжает текст с ТЕГОМ СЛОЯ: без него код вроде
  * `not_found` неинтерпретируем, потому что в разных слоях он значит разное.
  */
-export function errorResult(tool: string, error: unknown, logger: Logger): CallToolResult {
+function errorResult(tool: string, error: unknown, logger: Logger): CallToolResult {
   const described = describeError(error);
   logger.error('вызов инструмента не удался', {
     tool,
@@ -282,8 +282,9 @@ export function createServer(options: CreateServerOptions): McpServer {
       description:
         'Сообщения треда. Тред это чат: у него собственный идентификатор, читается он теми же ' +
         'страницами и той же формой сообщений, а пишут в него обычной отправкой в этот идентификатор. ' +
-        'Стоит три вызова к серверу (список чатов, список тредов, страница треда). Форма списка ' +
-        'тредов и форма истории треда наблюдены живьём. Вызов по message_id объявлен неподтверждённым: ' +
+        'Стоит три вызова к серверу (список чатов, список тредов, страница треда). Список тредов ' +
+        'наблюдён живьём, страница треда читается тем же путём, что и история чата, но живьём не ' +
+        'подтверждена. Вызов по message_id объявлен неподтверждённым: ' +
         'равенство адреса треда и адреса стартового сообщения снято с бандла веб-клиента, поэтому ' +
         'существование треда дополнительно проверяется по списку.',
       inputSchema: {

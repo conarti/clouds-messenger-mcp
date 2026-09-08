@@ -55,6 +55,49 @@ async function main(): Promise<void> {
     deps: { ws, rest, auth, crypto, keyStore, config, logger },
   });
   const transport = new StdioServerTransport();
+
+  /*
+   * Выход закрывает сокет. Транспорт stdio закрывается, когда уходит клиент MCP, сигналы
+   * приходят от того, кто запустил процесс: в обоих случаях живое соединение с сервером
+   * задержало бы процесс на своём таймауте и оставило бы сессию открытой на той стороне.
+   *
+   * Обработчик ставится ДО подключения намеренно: транспорт принадлежит SDK, и при
+   * подключении SDK подменяет `onclose` своим, сохранив уже назначенный и вызывая его
+   * первым. Назначение после подключения затёрло бы обработчик самого SDK.
+   *
+   * Отказ закрытия уходит только в лог: он не меняет того, что процесс уходит, а
+   * ненулевой код выхода на несостоявшемся закрытии читался бы как отказ сервера.
+   *
+   * КОД ВЫХОДА ЗАВИСИТ ОТ ПРИЧИНЫ ОСТАНОВА, А НЕ ОТ ИСХОДА ЗАКРЫТИЯ СОКЕТА. Закрытие
+   * транспорта stdio это штатный уход клиента MCP, и код в этом случае 0. Сигнал ОС это
+   * не наш выбор, а решение того, кто запустил процесс, и оболочка с супервизорами
+   * (systemd, pm2, docker) ждут по конвенции код 128 + номер сигнала (SIGINT -> 130,
+   * SIGTERM -> 143), чтобы отличить смерть по сигналу от обычного завершения и решить,
+   * перезапускать ли процесс.
+   */
+  let stopping = false;
+  const shutdown = (reason: string, exitCode: number): void => {
+    if (stopping) {
+      return;
+    }
+    stopping = true;
+    logger.info('остановка сервера MCP', { reason });
+    void ws
+      .close()
+      .catch((error: unknown) => {
+        logger.warn('сокет не закрылся штатно', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      })
+      .finally(() => {
+        process.exit(exitCode);
+      });
+  };
+
+  transport.onclose = () => shutdown('транспорт stdio закрыт', 0);
+  process.on('SIGINT', () => shutdown('SIGINT', 130));
+  process.on('SIGTERM', () => shutdown('SIGTERM', 143));
+
   await server.connect(transport);
 
   logger.info('сервер MCP подключён по stdio');

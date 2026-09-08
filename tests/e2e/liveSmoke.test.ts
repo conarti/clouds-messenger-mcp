@@ -291,10 +291,18 @@ describe.runIf(process.env[E2E_ENV] === '1')(
       const threads = await fetchThreadList(deps, chatId);
 
       expect(Array.isArray(threads)).toBe(true);
-      expect(threads.length).toBeGreaterThanOrEqual(0);
 
       /* Наружу идут только треды полигона: чужие чаты не читаются и не считаются */
       const polygonThreads = threads.filter((thread) => thread.chat_id === chatId);
+      /*
+       * Утверждение о ФОРМЕ, а не о количестве. Тредов у полигона может не быть вовсе, и
+       * пустой список это законный исход пробы; а вот элемент без адреса-UUID либо с чужим
+       * чатом означает расхождение с протоколом, и молчать о нём проверка не имеет права.
+       */
+      for (const thread of polygonThreads) {
+        expect(thread.thread_id).toMatch(UUID_PATTERN);
+        expect(thread.chat_id).toBe(chatId);
+      }
       const known = new Set(messages.map((entry) => entry.message_id));
       const matched = polygonThreads.filter((thread) => known.has(thread.thread_id)).length;
 

@@ -17,12 +17,8 @@ import { buildEventsHistoryPayload, fetchHistoryPage } from '../../src/protocol/
 import type { RestClient } from '../../src/transport/types.js';
 import type { PhoenixClient } from '../../src/transport/ws/types.js';
 import { createLogger } from '../../src/util/logger.js';
-import { makeInnerText, makeRawChat, MY_HUID, POLYGON_CHAT_ID } from '../helpers/readFixtures.js';
+import { makeInnerText, makeRawChat, syncId, MY_HUID, POLYGON_CHAT_ID } from '../helpers/readFixtures.js';
 import { createTestConfig } from '../helpers/testConfig.js';
-
-function syncId(index: number): string {
-  return `00000000-0000-4000-8000-${index.toString().padStart(12, '0')}`;
-}
 
 /** День сентября, чтобы окно по датам читалось глазами: событие index приходится на 0index */
 function dayIso(index: number): string {

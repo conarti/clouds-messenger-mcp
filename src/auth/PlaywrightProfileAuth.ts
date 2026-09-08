@@ -10,7 +10,7 @@
  */
 import { chromium } from 'playwright';
 import type { Config } from '../config/types.js';
-import { AUTHENTICATE_EVENT } from '../transport/ws/frames.js';
+import { AUTHENTICATE_EVENT } from '../config/wireEvents.js';
 import { asObject, stringOr } from '../util/json.js';
 import type { Logger } from '../util/logger.js';
 import { AuthError, type AuthProvider, type KeyMaterial, type Whoami } from './AuthProvider.js';

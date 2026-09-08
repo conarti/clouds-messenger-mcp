@@ -10,10 +10,10 @@ import type {
 } from './types.js';
 
 /** Каталог артефактов внутри ~/.config */
-export const CONFIG_DIR_NAME = 'clouds-messenger-mcp';
-export const CONFIG_FILE_NAME = 'config.json';
-export const PROFILE_DIR_NAME = 'profile';
-export const DOWNLOADS_DIR_NAME = 'downloads';
+const CONFIG_DIR_NAME = 'clouds-messenger-mcp';
+const CONFIG_FILE_NAME = 'config.json';
+const PROFILE_DIR_NAME = 'profile';
+const DOWNLOADS_DIR_NAME = 'downloads';
 
 /** Переменная окружения, переопределяющая путь файла конфига (нужна тестам) */
 export const CONFIG_FILE_ENV = 'CLOUDS_MESSENGER_MCP_CONFIG';

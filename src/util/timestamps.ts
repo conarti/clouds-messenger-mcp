@@ -5,12 +5,6 @@
  * появится соблазн «сдвинуть границу на единицу», как это делалось на микросекундных метках.
  */
 
-/** Окно по времени; обе границы включающие, любая может отсутствовать */
-export interface IsoWindow {
-  from?: string;
-  to?: string;
-}
-
 /** Разбирает ISO-8601. Непонятная строка это отказ, а не молчаливый NaN дальше по коду */
 export function parseIso(value: string): Date {
   const millis = Date.parse(value);
@@ -27,16 +21,4 @@ export function toIso(value: Date | number): string {
     throw new TypeError('timestamp: невалидная дата');
   }
   return date.toISOString();
-}
-
-/** Попадает ли метка в окно. Пустое окно принимает всё: фильтр не задан, значит не фильтруем */
-export function isWithinWindow(value: string, window: IsoWindow): boolean {
-  const millis = parseIso(value).getTime();
-  if (window.from !== undefined && millis < parseIso(window.from).getTime()) {
-    return false;
-  }
-  if (window.to !== undefined && millis > parseIso(window.to).getTime()) {
-    return false;
-  }
-  return true;
 }

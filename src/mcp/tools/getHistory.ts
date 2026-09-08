@@ -12,6 +12,13 @@
  * двадцать страниц страховочный: без него запрос с далёкой датой в живом чате уходил бы
  * листать историю до основания.
  *
+ * ОТКАЗ РАСШИФРОВКИ ЕДЕТ ВНУТРИ УСПЕХА, И ПОЭТОМУ ОБЪЯВЛЯЕТСЯ ОТДЕЛЬНО. Нечитаемое
+ * событие остаётся в выдаче с `decrypt_error`, а сама выдача сохраняет `status:"ok"`:
+ * страница прочитана. Отказ службы ключей и обрыв сокета приезжают тем же полем, что и
+ * чужой ключ, и без сводки вызывающий не отличает «сообщение не расшифровано» от «служба
+ * ключей недоступна». Поэтому появляется `decrypt_error_summary` со слоями и признаком
+ * `transient`: у транзиентного отказа повтор вызова осмыслен, у клиентского нет.
+ *
  * ПРИЗНАК ПРОДОЛЖЕНИЯ НАБЛЮДЁН ЖИВЬЁМ. Сервер присылает его полем `has_more_events`
  * (живая проба на полигоне), и `has_more` в выдаче это оно и есть. Считать признак по длине
  * страницы по-прежнему нельзя: неполная страница у сервера означает не конец истории, а его
@@ -21,7 +28,13 @@
 import { resolveChat } from '../../chat/resolveChat.js';
 import { resolveFailure, type ChatResolveFailure } from '../../chat/resolveFailure.js';
 import type { ChatRecord } from '../../protocol/chatShape.js';
-import { decryptHistoryEvents, toMessages } from '../../protocol/decryptHistory.js';
+import {
+  DECRYPT_RETRY_NEXT_STEP,
+  decryptHistoryEvents,
+  summarizeDecryptErrors,
+  toMessages,
+  type DecryptErrorSummary,
+} from '../../protocol/decryptHistory.js';
 import { enrichMessages, type EnrichedMessage } from '../../protocol/enrichMessage.js';
 import { fetchHistoryPage } from '../../protocol/history.js';
 import { parseIso } from '../../util/timestamps.js';
@@ -48,6 +61,10 @@ export interface GetHistoryOk {
   next_before?: string;
   /** Признак продолжения от сервера: имя поля на проводе наблюдено живой пробой */
   has_more?: boolean;
+  /** Есть, только если хоть одно событие не расшифровалось: отсутствие ключа значит «все читаемы» */
+  decrypt_error_summary?: DecryptErrorSummary;
+  /** Есть, только если отказ транзиентный: подсказка без действия обесценивает подсказку */
+  next_step?: string;
 }
 
 export type GetHistoryResult = GetHistoryOk | ChatResolveFailure;
@@ -106,14 +123,45 @@ async function readPage(
   chat: ChatRecord,
   limit: number,
   cursor: string | undefined,
-): Promise<{ messages: EnrichedMessage[]; rawCount: number; hasMore?: boolean }> {
+): Promise<{
+  messages: EnrichedMessage[];
+  rawCount: number;
+  hasMore?: boolean;
+  decryptErrors?: DecryptErrorSummary;
+}> {
   const page = await fetchHistoryPage(deps, {
     chatId: chat.chat_id,
     limit,
     ...(cursor !== undefined ? { before: cursor } : {}),
   });
-  const messages = enrichMessages(toMessages(await decryptHistoryEvents(deps, page.events)), chat);
-  return { messages, rawCount: page.serverCount, ...(page.hasMore !== undefined ? { hasMore: page.hasMore } : {}) };
+  const decrypted = await decryptHistoryEvents(deps, page.events);
+  const messages = enrichMessages(toMessages(decrypted), chat);
+  const decryptErrors = summarizeDecryptErrors(decrypted);
+  return {
+    messages,
+    rawCount: page.serverCount,
+    ...(page.hasMore !== undefined ? { hasMore: page.hasMore } : {}),
+    ...(decryptErrors !== undefined ? { decryptErrors } : {}),
+  };
+}
+
+/**
+ * Сводки страниц в одну. Считается по ВСЕМ прочитанным страницам, а не по отданному срезу:
+ * отказ службы ключей на добранной странице это тот же отказ, и умолчать о нём потому,
+ * что событие не влезло в лимит, значит соврать о полноте прочитанного.
+ */
+function mergeSummaries(
+  parts: readonly DecryptErrorSummary[],
+): DecryptErrorSummary | undefined {
+  if (parts.length === 0) {
+    return undefined;
+  }
+  const layers = [...new Set(parts.flatMap((part) => part.layers))].sort();
+  return {
+    count: parts.reduce((total, part) => total + part.count, 0),
+    layers,
+    transient: parts.some((part) => part.transient),
+  };
 }
 
 export async function getHistory(deps: ToolDeps, input: GetHistoryInput): Promise<GetHistoryResult> {
@@ -128,6 +176,7 @@ export async function getHistory(deps: ToolDeps, input: GetHistoryInput): Promis
 
   /* Накопитель идёт от новых к старым: страница берётся с новейшего края окна */
   const collected: EnrichedMessage[] = [];
+  const decryptParts: DecryptErrorSummary[] = [];
   let cursor = input.before;
   let serverHasMore: boolean | undefined;
   let pages = 0;
@@ -137,6 +186,9 @@ export async function getHistory(deps: ToolDeps, input: GetHistoryInput): Promis
     pages += 1;
     if (page.hasMore !== undefined) {
       serverHasMore = page.hasMore;
+    }
+    if (page.decryptErrors !== undefined) {
+      decryptParts.push(page.decryptErrors);
     }
     for (const message of [...page.messages].reverse()) {
       if (withinWindow(message, window)) {
@@ -155,12 +207,14 @@ export async function getHistory(deps: ToolDeps, input: GetHistoryInput): Promis
 
   const messages = collected.slice(0, limit).reverse();
   const oldestReturned = messages[0];
+  const decryptErrors = mergeSummaries(decryptParts);
 
   deps.logger.debug('get_history: страница собрана', {
     chatId: chat.chat_id,
     count: messages.length,
     pages,
     windowed: hasWindow(window),
+    decryptFailed: decryptErrors?.count ?? 0,
   });
 
   return {
@@ -169,5 +223,7 @@ export async function getHistory(deps: ToolDeps, input: GetHistoryInput): Promis
     messages,
     ...(oldestReturned !== undefined ? { next_before: oldestReturned.message_id } : {}),
     ...(serverHasMore !== undefined ? { has_more: serverHasMore } : {}),
+    ...(decryptErrors !== undefined ? { decrypt_error_summary: decryptErrors } : {}),
+    ...(decryptErrors?.transient === true ? { next_step: DECRYPT_RETRY_NEXT_STEP } : {}),
   };
 }

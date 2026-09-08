@@ -114,6 +114,26 @@ describe('редакция по именам полей', () => {
   });
 });
 
+describe('исключения словаря редакции', () => {
+  it('context остаётся читаемым, а text_preview и plaintext вырезаются', () => {
+    const { logger, entries } = capture();
+
+    logger.debug('вызов инструмента', {
+      context: 'get_history',
+      component: 'ws',
+      text_preview: 'первые слова чужого сообщения',
+      plaintext: 'расшифрованное тело',
+    });
+
+    const [entry] = entries();
+    /* Слово text сидит внутри context подстрокой, но переписки в нём нет */
+    expect(entry?.['context']).toBe('get_history');
+    expect(entry?.['component']).toBe('ws');
+    expect(entry?.['text_preview']).toBe(REDACTED);
+    expect(entry?.['plaintext']).toBe(REDACTED);
+  });
+});
+
 describe('редакция по подстроке значения', () => {
   it('глушит секретоподобную последовательность даже под безобидным именем поля', () => {
     const { logger, entries } = capture();

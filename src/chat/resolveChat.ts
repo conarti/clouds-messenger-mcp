@@ -39,11 +39,11 @@ export type ResolveChatResult =
   | { kind: 'ambiguous'; candidates: ChatCandidate[] }
   | { kind: 'not_found'; reason: string };
 
-export function isChatId(value: string): boolean {
+function isChatId(value: string): boolean {
   return UUID_PATTERN.test(value);
 }
 
-export function toChatCandidate(chat: ChatRecord): ChatCandidate {
+function toChatCandidate(chat: ChatRecord): ChatCandidate {
   return {
     chat_id: chat.chat_id,
     ...(chat.name !== undefined ? { name: chat.name } : {}),

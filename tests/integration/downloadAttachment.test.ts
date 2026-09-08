@@ -22,16 +22,13 @@ import {
   makeInnerImage,
   makeInnerText,
   makeRawChat,
+  syncId,
 } from '../helpers/readFixtures.js';
 import { startToolServer, type ToolServer } from '../helpers/toolServer.js';
 
 const CHATS = [makeRawChat({ chatId: POLYGON_CHAT_ID, name: 'Избранное', chatType: 'notes' })];
 const FILE_ID = 'c0ffee00-0000-4000-8000-000000000001';
 const FILE_BYTES = new Uint8Array([9, 8, 7, 6, 5]);
-
-function syncId(index: number): string {
-  return `00000000-0000-4000-8000-${index.toString().padStart(12, '0')}`;
-}
 
 let ring: KeyRing;
 let server: ToolServer;

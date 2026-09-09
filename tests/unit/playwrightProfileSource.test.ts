@@ -33,6 +33,15 @@ import { createTestConfig } from '../helpers/testConfig.js';
 const HEADLESS_TIMEOUT_MS = 50;
 const HEADED_TIMEOUT_MS = 120;
 
+/**
+ * Бюджет попытки, которой дают дождаться ключей. Он заметно больше обычного тестового:
+ * ожидание материала обязано укладываться в бюджет попытки, а не проскакивать по краю.
+ */
+const LATE_MATERIAL_TIMEOUT_MS = 2_000;
+
+/** Шаг опроса профиля, который попытка запрашивает у страницы между чтениями хранилищ */
+const MATERIAL_POLL_INTERVAL_MS = 1_000;
+
 const FRAME_BEARER = 'bearer-из-кадра-аутентификации';
 const STALE_HEADER_BEARER = 'bearer-протухший-первый';
 const FRESH_HEADER_BEARER = 'bearer-свежий-последний';
@@ -66,6 +75,23 @@ const AUTH_STATE_ROWS: unknown[] = [
   },
 ];
 
+/**
+ * Тот же срез в состоянии первых секунд после входа: узла с приватными ключами в нём ещё
+ * нет, потому что клиент их только расшифровывает. Ровно это и видит ранний опрос профиля.
+ */
+const AUTH_STATE_ROWS_WITHOUT_KEYS: unknown[] = [
+  { settings: { theme: 'dark' } },
+  {
+    persist: {
+      version: 1,
+      user: {
+        publicKeys: { cts: { body: 'c2ludGV0aWNhLXB1Yg==', id: 'cts-public-key-id' } },
+        userPrivateKeysDecrypted: false,
+      },
+    },
+  },
+];
+
 const REDUX_PROFILES: unknown = {
   entities: [
     { isMe: false, userHuid: 'чужой-huid' },
@@ -86,6 +112,8 @@ interface AttemptScenario {
   authenticateToken?: string;
   cookies?: ProfileCookie[];
   authStateRows?: unknown[];
+  /** Записи authState по номеру опроса: последняя повторяется, пока опрос продолжается */
+  authStatePolls?: unknown[][];
   profiles?: unknown;
   /** Навигация бросает: контекст обязан закрыться всё равно */
   navigationFails?: boolean;
@@ -120,6 +148,21 @@ function emptyScenario(): AttemptScenario {
   return profileStorage();
 }
 
+/**
+ * Профиль первого входа: токен и сокет уже есть, а ключи устройства ещё расшифровываются.
+ * Записи authState отдаются по очереди, поэтому опрос виден как последовательность чтений.
+ */
+function scenarioWithLateMaterial(polls: unknown[][]): AttemptScenario {
+  return {
+    headerBearers: [STALE_HEADER_BEARER, FRESH_HEADER_BEARER],
+    socketUrl: SOCKET_URL,
+    authenticateToken: FRAME_BEARER,
+    cookies: PROFILE_COOKIES,
+    profiles: REDUX_PROFILES,
+    authStatePolls: polls,
+  };
+}
+
 class FakeWebSocket implements ProfileWebSocket {
   private readonly frameListeners: ((frame: ProfileWebSocketFrame) => void)[] = [];
 
@@ -143,6 +186,12 @@ class FakeWebSocket implements ProfileWebSocket {
 }
 
 class FakePage implements ProfilePage {
+  /** Сколько раз попытка прочитала authState: столько же раз она опросила профиль */
+  authStateReads = 0;
+
+  /** Запрошенные паузы опроса: по ним видно, что между чтениями попытка выжидала */
+  readonly waits: number[] = [];
+
   private readonly requestListeners: ((request: ProfileRequest) => void)[] = [];
   private readonly socketListeners: ((socket: ProfileWebSocket) => void)[] = [];
 
@@ -203,9 +252,32 @@ class FakePage implements ProfilePage {
    */
   async evaluate<Result>(script: string): Promise<Result> {
     if (script.includes('authState')) {
-      return (this.scenario.authStateRows ?? []) as Result;
+      return this.nextAuthStateRows() as Result;
     }
     return (this.scenario.profiles ?? null) as Result;
+  }
+
+  /**
+   * Пауза опроса без ожидания вживую: проверяется, что попытка возвращается к профилю
+   * ещё раз, а не то, что она умеет ждать секунду. Такт событий здесь нужен, чтобы цикл
+   * попытки не занимал поток целиком.
+   */
+  async waitForTimeout(timeout: number): Promise<void> {
+    this.waits.push(timeout);
+    await new Promise((resolve) => {
+      setTimeout(resolve, 1);
+    });
+  }
+
+  /** Записи очередного опроса: сценарий без очереди отдаёт одно и то же на каждом чтении */
+  private nextAuthStateRows(): unknown[] {
+    const polls = this.scenario.authStatePolls;
+    const index = this.authStateReads;
+    this.authStateReads += 1;
+    if (polls === undefined) {
+      return this.scenario.authStateRows ?? [];
+    }
+    return polls[Math.min(index, polls.length - 1)] ?? [];
   }
 }
 
@@ -216,6 +288,16 @@ class FakeBrowserContext implements ProfileBrowserContext {
 
   constructor(private readonly scenario: AttemptScenario) {
     this.page = new FakePage(scenario);
+  }
+
+  /** Сколько опросов профиля стоило за собой одному подъёму */
+  get authStateReads(): number {
+    return this.page.authStateReads;
+  }
+
+  /** Паузы между опросами того же подъёма */
+  get waits(): number[] {
+    return this.page.waits;
   }
 
   pages(): ProfilePage[] {
@@ -275,9 +357,18 @@ function recordingLogger(records: LogRecord[]): Logger {
   };
 }
 
-function testConfig(): Config {
+/** Бюджеты попыток: по умолчанию тестовые, но ожиданию ключей нужен свой */
+interface AttemptTimeouts {
+  headlessTimeoutMs?: number;
+  headedTimeoutMs?: number;
+}
+
+function testConfig(timeouts: AttemptTimeouts = {}): Config {
   return createTestConfig({
-    auth: { headlessTimeoutMs: HEADLESS_TIMEOUT_MS, headedTimeoutMs: HEADED_TIMEOUT_MS },
+    auth: {
+      headlessTimeoutMs: timeouts.headlessTimeoutMs ?? HEADLESS_TIMEOUT_MS,
+      headedTimeoutMs: timeouts.headedTimeoutMs ?? HEADED_TIMEOUT_MS,
+    },
   });
 }
 
@@ -288,9 +379,12 @@ interface Harness {
   source: PlaywrightProfileSource;
 }
 
-function harness(scenarios: { headless: AttemptScenario; headed: AttemptScenario }): Harness {
+function harness(
+  scenarios: { headless: AttemptScenario; headed: AttemptScenario },
+  timeouts: AttemptTimeouts = {},
+): Harness {
   const browser = new FakeBrowser(scenarios);
-  const config = testConfig();
+  const config = testConfig(timeouts);
   const records: LogRecord[] = [];
   const source = new PlaywrightProfileSource({
     config,
@@ -331,6 +425,56 @@ describe('headless-заход при живой сессии', () => {
     expect(session.bearer).toBe(FRESH_HEADER_BEARER);
     expect(session.bearer).not.toBe(STALE_HEADER_BEARER);
     expect(browser.launches).toHaveLength(1);
+  });
+});
+
+describe('ключи устройства появляются позже токена', () => {
+  it('попытка опрашивает профиль, пока ключи не расшифрованы, и укладывается в один подъём', async () => {
+    const { browser, config, source } = harness(
+      {
+        headless: scenarioWithLateMaterial([
+          AUTH_STATE_ROWS_WITHOUT_KEYS,
+          AUTH_STATE_ROWS_WITHOUT_KEYS,
+          AUTH_STATE_ROWS,
+        ]),
+        headed: emptyScenario(),
+      },
+      { headlessTimeoutMs: LATE_MATERIAL_TIMEOUT_MS },
+    );
+
+    const session = await source.load();
+
+    /* Окно ручного входа не понадобилось: материал приехал в том же заходе, что и токен */
+    expect(browser.launches).toEqual([{ headless: true, profileDir: config.paths.profileDir }]);
+    expect(browser.contexts[0]?.authStateReads).toBe(3);
+    expect(browser.contexts[0]?.waits).toEqual([MATERIAL_POLL_INTERVAL_MS, MATERIAL_POLL_INTERVAL_MS]);
+    expect(session.bearer).toBe(FRAME_BEARER);
+    expect(session.huid).toBe('мой-huid');
+    expect(session.keyMaterial.privateKeys.cts?.publicKeyId).toBe('cts-public-key-id');
+    expect(session.keyMaterial.signKeys.publicId).toBe('sign-public-key-id');
+    expect(browser.closeCalls).toBe(1);
+  });
+
+  it('ключи не приехали до дедлайна: отказ называет материал, и поднимается окно', async () => {
+    const { browser, records, source } = harness({
+      headless: scenarioWithLateMaterial([AUTH_STATE_ROWS_WITHOUT_KEYS]),
+      headed: sessionScenario(),
+    });
+
+    const session = await source.load();
+
+    expect(browser.launches.map((launch) => launch.headless)).toEqual([true, false]);
+    /* Опрос повторялся, а не оборвался на первом чтении пустого профиля */
+    expect(browser.contexts[0]?.authStateReads).toBeGreaterThan(1);
+
+    const warning = records.find((record) => record.level === 'warn');
+    const reason = String((warning?.fields as { reason?: unknown } | undefined)?.reason ?? '');
+    expect(reason).toContain('не дождались');
+    expect(reason).toContain('ключевой материал');
+    expect(reason).toContain('ждали');
+
+    expect(session.bearer).toBe(FRAME_BEARER);
+    expect(browser.closeCalls).toBe(2);
   });
 });
 

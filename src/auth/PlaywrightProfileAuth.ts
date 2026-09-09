@@ -20,6 +20,7 @@ import {
   extractHuidFromProfiles,
   extractKeyMaterialFromAuthState,
   parseWsParams,
+  type AuthStateMaterial,
   type ProfileCookie,
 } from './profileMaterial.js';
 
@@ -36,6 +37,18 @@ const POLL_INTERVAL_MS = 250;
  * жёг бы весь бюджет входа при полностью рабочих кредах.
  */
 const AUTHENTICATE_FRAME_GRACE_MS = 3_000;
+
+/**
+ * Шаг опроса хранилищ профиля в ожидании ключей устройства.
+ *
+ * Веб-клиент восстанавливает приватные ключи ПОСЛЕ того, как получил токен и поднял сокет:
+ * расшифровка идёт несколькими попытками и занимает десятки секунд. Одно чтение IndexedDB
+ * сразу после стабилизации объявляло бы отказом нормальный первый вход.
+ */
+const MATERIAL_POLL_INTERVAL_MS = 1_000;
+
+/** Как часто ожидание объявляет о себе: окно открыто, и у него должен быть признак жизни */
+const MATERIAL_NOTICE_INTERVAL_MS = 10_000;
 
 /**
  * Чтение записей IndexedDB `authState`/items.
@@ -159,6 +172,8 @@ export interface ProfilePage {
   on(event: 'websocket', handler: (socket: ProfileWebSocket) => void): void;
   goto(url: string, options: { waitUntil: 'domcontentloaded' }): Promise<unknown>;
   evaluate<Result>(script: string): Promise<Result>;
+  /** Пауза между опросами профиля идёт через страницу: так вкладка остаётся живой и видимой */
+  waitForTimeout(timeout: number): Promise<void>;
 }
 
 /** Контекст персистентного профиля в объёме, который нужен снимку */
@@ -292,11 +307,17 @@ export class PlaywrightProfileSource implements ProfileSessionSource {
         });
       });
 
+      /*
+       * Дедлайн один на всю попытку и отсчитывается от её старта: стабилизация токена и
+       * ожидание ключей это две фазы одного входа, и раздельные бюджеты давали бы попытку
+       * длиной в две суммы вместо обещанной одной.
+       */
+      const deadline = Date.now() + timeoutMs;
+
       await page.goto(`${config.protocol.webOrigin}/#/`, { waitUntil: 'domcontentloaded' }).catch(() => {
         /* Сеть могла моргнуть: стабилизацию всё равно ждём по перехвату, а не по навигации */
       });
 
-      const deadline = Date.now() + timeoutMs;
       let graceDeadline: number | undefined;
       for (;;) {
         if (socketUrl !== undefined && socketBearer !== undefined) {
@@ -334,15 +355,11 @@ export class PlaywrightProfileSource implements ProfileSessionSource {
         return { failure: 'в профиле нет cookie хостов сессии' };
       }
 
-      const material = extractKeyMaterialFromAuthState(await page.evaluate<unknown[]>(READ_AUTH_STATE_ROWS));
-      if (material === undefined) {
-        return { failure: 'в профиле не найден ключевой материал (authState/items)' };
+      const awaited = await this.awaitProfileMaterial(page, deadline, headless);
+      if ('failure' in awaited) {
+        return awaited;
       }
-
-      const huid = extractHuidFromProfiles(await page.evaluate<unknown>(READ_REDUX_PROFILES));
-      if (huid === undefined) {
-        return { failure: 'в профиле не найден huid (reduxState/items, profiles)' };
-      }
+      const { material, huid } = awaited;
 
       /*
        * Имена полей намеренно обходят словарь редакции логгера: поле с «bearer», «cookie»
@@ -367,6 +384,55 @@ export class PlaywrightProfileSource implements ProfileSessionSource {
       };
     } finally {
       await context.close();
+    }
+  }
+
+  /**
+   * Ожидание ключевого материала и huid в остатке бюджета попытки.
+   *
+   * Токен и сокет появляются раньше ключей: сразу после входа клиент только начинает
+   * расшифровывать приватные ключи устройства, и в хранилищах профиля их ещё нет. Поэтому
+   * пустое чтение это не отказ, а «ещё рано», и попытка опрашивает профиль до появления
+   * материала либо до общего дедлайна. Окно браузера всё это время остаётся открытым: в
+   * headed-заходе пользователь видит приложение, а оно доводит расшифровку до конца.
+   */
+  private async awaitProfileMaterial(
+    page: ProfilePage,
+    deadline: number,
+    headless: boolean,
+  ): Promise<{ material: AuthStateMaterial; huid: string } | { failure: string }> {
+    const startedAt = Date.now();
+    let announcedAt = startedAt;
+
+    for (;;) {
+      const material = extractKeyMaterialFromAuthState(
+        await page.evaluate<unknown[]>(READ_AUTH_STATE_ROWS),
+      );
+      const huid = extractHuidFromProfiles(await page.evaluate<unknown>(READ_REDUX_PROFILES));
+      if (material !== undefined && huid !== undefined) {
+        return { material, huid };
+      }
+
+      const now = Date.now();
+      if (now >= deadline) {
+        const missing = [
+          material === undefined ? 'ключевой материал (authState/items)' : undefined,
+          huid === undefined ? 'huid (reduxState/items, profiles)' : undefined,
+        ].filter((item): item is string => item !== undefined);
+        return { failure: `в профиле не дождались: ${missing.join(', ')} (ждали ${now - startedAt} мс)` };
+      }
+
+      if (now - announcedAt >= MATERIAL_NOTICE_INTERVAL_MS) {
+        announcedAt = now;
+        this.options.logger.info('auth: ждём ключевой материал профиля', {
+          headless,
+          waitedMs: now - startedAt,
+          hasMaterial: material !== undefined,
+          hasHuid: huid !== undefined,
+        });
+      }
+
+      await page.waitForTimeout(MATERIAL_POLL_INTERVAL_MS);
     }
   }
 

@@ -12,5 +12,11 @@ export interface KdcKey {
  */
 export interface RestClient {
   getJson<T>(path: string, query?: Record<string, string>): Promise<T>;
+  /**
+   * POST с телом в JSON. Единственный известный потребитель это справка о профилях по
+   * huid: запрос читающий по смыслу, а метод POST выбран сервером ради длинного списка
+   * идентификаторов в теле, и повтор такого вызова так же безопасен, как повтор GET.
+   */
+  postJson<T>(path: string, body: unknown): Promise<T>;
   getKdcKeys(ids: readonly string[]): Promise<KdcKey[]>;
 }

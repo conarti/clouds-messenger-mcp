@@ -33,6 +33,7 @@ function createHarness() {
 
   const rest = {
     getJson: vi.fn(forbidden('rest.getJson')),
+    postJson: vi.fn(forbidden('rest.postJson')),
     getKdcKeys: vi.fn(forbidden('rest.getKdcKeys')),
   } satisfies RestClient;
 
@@ -73,6 +74,7 @@ function createHarness() {
     ws.request,
     ws.close,
     rest.getJson,
+    rest.postJson,
     rest.getKdcKeys,
     auth.getBearer,
     auth.getCookieHeader,

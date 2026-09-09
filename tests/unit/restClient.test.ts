@@ -11,6 +11,9 @@ import { createTestConfig } from '../helpers/testConfig.js';
 interface FetchCall {
   url: string;
   headers: Record<string, string>;
+  method: string;
+  /** Тело кадра как строка: у GET его нет вовсе, и это тоже утверждение о договоре */
+  body?: string;
 }
 
 interface Harness {
@@ -32,6 +35,8 @@ function createHarness(responses: Array<() => Response>): Harness {
     calls.push({
       url: String(input),
       headers: (init?.headers ?? {}) as Record<string, string>,
+      method: init?.method ?? 'GET',
+      ...(typeof init?.body === 'string' ? { body: init.body } : {}),
     });
     const next = responses[Math.min(calls.length - 1, responses.length - 1)];
     if (next === undefined) {
@@ -180,6 +185,67 @@ describe('HttpRestClient.getJson', () => {
 
     expect(error).toBeInstanceOf(RestError);
     expect(error.code).toBe('invalid_json');
+  });
+});
+
+describe('HttpRestClient.postJson', () => {
+  it('шлёт POST с телом в JSON, тем же bearer, cookie и типом содержимого', async () => {
+    const harness = createHarness([() => jsonResponse({ status: 'ok' })]);
+
+    await harness.client.postJson('/v1/phonebook/cts_profiles/query', { huids: ['a', 'b'] });
+
+    const call = harness.calls[0];
+    expect(call?.method).toBe('POST');
+    expect(call?.url).toBe('https://cts01.clouds.org.ru/api/v1/phonebook/cts_profiles/query');
+    expect(call?.body).toBe(JSON.stringify({ huids: ['a', 'b'] }));
+    expect(call?.headers['Content-Type']).toBe('application/json');
+    expect(call?.headers['Authorization']).toBe('Bearer bearer-1');
+    expect(call?.headers['Cookie']).toBe('clouds_session=fake-session');
+    expect(call?.headers['User-Agent']).toContain('Mozilla/5.0');
+  });
+
+  /* Политика повторов у POST та же, что у GET: этот POST ничего на сервере не меняет */
+  it('на 401 сбрасывает кэш авторизации и повторяет ровно один раз с новым bearer', async () => {
+    const harness = createHarness([
+      () => jsonResponse({ error: 'unauthorized' }, 401),
+      () => jsonResponse({ status: 'ok' }),
+    ]);
+
+    await expect(harness.client.postJson('/v1/whatever', { huids: [] })).resolves.toEqual({
+      status: 'ok',
+    });
+    expect(harness.auth.calls.onAuthFailure).toBe(1);
+    expect(harness.calls).toHaveLength(2);
+    expect(harness.calls[1]?.headers['Authorization']).toBe('Bearer bearer-2');
+    expect(harness.calls[1]?.body).toBe(JSON.stringify({ huids: [] }));
+  });
+
+  it('на 429 выдерживает паузу из Retry-After и повторяет ровно один раз', async () => {
+    const harness = createHarness([
+      () =>
+        new Response(JSON.stringify({ error: 'rate_limited' }), {
+          status: 429,
+          headers: { 'Retry-After': '2' },
+        }),
+      () => jsonResponse({ status: 'ok' }),
+    ]);
+
+    await expect(harness.client.postJson('/v1/whatever', {})).resolves.toEqual({ status: 'ok' });
+    expect(harness.pauses).toEqual([2_000]);
+    expect(harness.calls).toHaveLength(2);
+    expect(harness.auth.calls.onAuthFailure).toBe(0);
+  });
+
+  it('прочий не-2xx отдаёт RestError со статусом и кодом из тела', async () => {
+    const harness = createHarness([() => jsonResponse({ error: 'unexpected' }, 404)]);
+
+    const error = (await harness.client
+      .postJson('/v1/whatever', {})
+      .catch((caught: unknown) => caught)) as RestError;
+
+    expect(error).toBeInstanceOf(RestError);
+    expect(error.status).toBe(404);
+    expect(error.code).toBe('unexpected');
   });
 });
 

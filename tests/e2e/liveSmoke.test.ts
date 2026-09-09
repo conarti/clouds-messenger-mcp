@@ -28,6 +28,7 @@ import { getMessageContext } from '../../src/mcp/tools/getMessageContext.js';
 import { listChats } from '../../src/mcp/tools/listChats.js';
 import { listReactions } from '../../src/mcp/tools/listReactions.js';
 import { SYSTEM_TOPIC } from '../../src/protocol/chatList.js';
+import { PERSONAL_CHAT_TYPE } from '../../src/protocol/chatShape.js';
 import { EVENT_INFO_EVENT, fetchEventBySyncId } from '../../src/protocol/eventInfo.js';
 import {
   EVENTS_HISTORY_EVENT,
@@ -51,6 +52,12 @@ const SUITE_TIMEOUT_MS = 180_000;
 
 /** Страница истории полигона: чат с собой короткий, полсотни событий его накрывают */
 const HISTORY_LIMIT = 50;
+
+/**
+ * Серверная заглушка имени личного чата. Сервер называет так ВСЕ личные чаты, поэтому
+ * равенство ей означает, что справка о профилях не сработала.
+ */
+const SERVER_PERSONAL_CHAT_NAME = 'personal chat';
 
 /** Лимит сырых проб формы ответа: спрашиваем ровно столько, сколько нужно на сверку краёв */
 const PROBE_LIMIT = 3;
@@ -158,6 +165,33 @@ describe.runIf(process.env[E2E_ENV] === '1')(
       observations['chats_total'] = listed.total_chats;
       observations['chats_unread'] = listed.unread_chats;
       observations['chats_by_kind'] = byKind;
+    });
+
+    /*
+     * Имена собеседников живут не в списке чатов, а в справке о профилях, и связка двух
+     * источников проверяема только живьём. Наружу идут булевы: имя коллеги в выводе
+     * проверки это те же персональные данные, что и в переписке.
+     */
+    it('личные чаты названы именами собеседников, а не серверной заглушкой', async () => {
+      const listed = await listChats(deps, { limit: 200 });
+      const personal = listed.chats.filter((chat) => chat.kind === PERSONAL_CHAT_TYPE);
+      if (personal.length === 0) {
+        throw new Error('в списке нет ни одного личного чата: предусловие пробы не выполнено');
+      }
+
+      const named = personal.some(
+        (chat) => chat.name !== undefined && chat.name !== SERVER_PERSONAL_CHAT_NAME,
+      );
+      const addressed = personal.some((chat) => chat.peer_huid !== undefined);
+
+      expect(named).toBe(true);
+      expect(addressed).toBe(true);
+
+      observations['personal_chats_any_named'] = named;
+      observations['personal_chats_any_with_peer'] = addressed;
+      observations['personal_chats_all_with_peer'] = personal.every(
+        (chat) => chat.peer_huid !== undefined,
+      );
     });
 
     it('get_history отдаёт расшифрованную страницу в неубывающем порядке', () => {

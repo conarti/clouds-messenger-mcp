@@ -9,6 +9,7 @@
     "chatListRequestVersion": 6,
     "threadListRequestVersion": 2,
     "kdcKeysPath": "/v1/kdc/keys/",
+    "phonebookProfilesPath": "/v1/phonebook/cts_profiles/query",
     "fileServicePath": "/v2/file_service/files/groupchat_file/",
     "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
   },
@@ -24,7 +25,8 @@
   "limits": {
     "listChatsDefaultLimit": 50,
     "searchDefaultLimit": 50,
-    "historyDefaultLimit": 50
+    "historyDefaultLimit": 50,
+    "profileCacheTtlMs": 600000
   },
   "auth": {
     "headlessTimeoutMs": 30000,

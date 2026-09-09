@@ -8,15 +8,31 @@
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
+import { FakeAuthProvider } from '../../src/auth/FakeAuthProvider.js';
 import {
   normalizeChat,
   normalizeChats,
+  resolvePeerNames,
   sortChatsByFreshness,
   toPublicChat,
+  type ChatRecord,
+  type PeerNamesDeps,
 } from '../../src/protocol/chatShape.js';
 import { UUID_PATTERN } from '../../src/protocol/messageShape.js';
-import { makeRawChat, OTHER_CHAT_ID, POLYGON_CHAT_ID } from '../helpers/readFixtures.js';
+import { resetProfileCache } from '../../src/protocol/profiles.js';
+import { createLogger } from '../../src/util/logger.js';
+import { FakeProfilesRest } from '../helpers/fakeRest.js';
+import {
+  makeRawChat,
+  MY_HUID,
+  NAMELESS_PEER_HUID,
+  OTHER_CHAT_ID,
+  PEER_HUID,
+  POLYGON_CHAT_ID,
+  type ProfileFixture,
+} from '../helpers/readFixtures.js';
+import { createTestConfig } from '../helpers/testConfig.js';
 
 function collectSources(directory: string): string[] {
   return readdirSync(directory).flatMap((entry) => {
@@ -99,6 +115,165 @@ describe('публичная выдача чата', () => {
   it('нулевое непрочитанное это не «непрочитано»', () => {
     const record = normalizeChat(makeRawChat({ chatId: POLYGON_CHAT_ID }));
     expect(toPublicChat(record!, 0).unread).toBe(false);
+  });
+});
+
+const PROFILES: ProfileFixture[] = [
+  {
+    huid: PEER_HUID,
+    name: 'Тестов Тест Тестович',
+    companyPosition: 'Инженер',
+    department: 'Отдел проб',
+  },
+];
+
+interface PeerProbe {
+  deps: PeerNamesDeps;
+  rest: FakeProfilesRest;
+  auth: FakeAuthProvider;
+}
+
+function createPeerProbe(): PeerProbe {
+  const rest = new FakeProfilesRest(PROFILES);
+  const auth = new FakeAuthProvider({ huid: MY_HUID });
+  return {
+    rest,
+    auth,
+    deps: { rest, auth, config: createTestConfig(), logger: createLogger({ level: 'error' }) },
+  };
+}
+
+function personalChat(chatId: string, memberHuids: string[]): ChatRecord {
+  const record = normalizeChat(
+    makeRawChat({ chatId, name: 'personal chat', chatType: 'chat', memberHuids }),
+  );
+  if (record === undefined) {
+    throw new Error('фикстура личного чата не нормализовалась');
+  }
+  return record;
+}
+
+beforeEach(() => {
+  resetProfileCache();
+});
+
+describe('участники чата', () => {
+  it('нормализация переносит member_huids внутрь записи', () => {
+    const record = normalizeChat(
+      makeRawChat({ chatId: POLYGON_CHAT_ID, chatType: 'chat', memberHuids: [MY_HUID, PEER_HUID] }),
+    );
+
+    expect(record?.member_huids).toEqual([MY_HUID, PEER_HUID]);
+  });
+
+  it('публичная выдача участников НЕ несёт: список людей чата наружу не уходит', () => {
+    const record = personalChat(POLYGON_CHAT_ID, [MY_HUID, PEER_HUID]);
+
+    const chat = toPublicChat(record, 0);
+
+    expect(Object.keys(chat)).not.toContain('member_huids');
+    expect(JSON.stringify(chat)).not.toContain(PEER_HUID);
+  });
+});
+
+describe('имена собеседников личных чатов', () => {
+  it('подставляет имя профиля вместо серверной заглушки и несёт адрес с профилем', async () => {
+    const probe = createPeerProbe();
+
+    const [resolved] = await resolvePeerNames(probe.deps, [
+      personalChat(POLYGON_CHAT_ID, [MY_HUID, PEER_HUID]),
+    ]);
+
+    expect(resolved?.name).toBe('Тестов Тест Тестович');
+    expect(resolved?.peer_huid).toBe(PEER_HUID);
+    expect(resolved?.peer).toEqual({
+      name: 'Тестов Тест Тестович',
+      company_position: 'Инженер',
+      department: 'Отдел проб',
+    });
+  });
+
+  it('имя и профиль собеседника доезжают до публичной выдачи', async () => {
+    const probe = createPeerProbe();
+
+    const [resolved] = await resolvePeerNames(probe.deps, [
+      personalChat(POLYGON_CHAT_ID, [MY_HUID, PEER_HUID]),
+    ]);
+    const chat = toPublicChat(resolved!, 0);
+
+    expect(chat.name).toBe('Тестов Тест Тестович');
+    expect(chat.peer_huid).toBe(PEER_HUID);
+    expect(chat.peer?.company_position).toBe('Инженер');
+  });
+
+  /* Придумать имя нельзя: huid это адрес, а не имя человека */
+  it('без профиля имя остаётся серверным, а рядом появляется адрес собеседника', async () => {
+    const probe = createPeerProbe();
+
+    const [resolved] = await resolvePeerNames(probe.deps, [
+      personalChat(OTHER_CHAT_ID, [MY_HUID, NAMELESS_PEER_HUID]),
+    ]);
+
+    expect(resolved?.name).toBe('personal chat');
+    expect(resolved?.peer_huid).toBe(NAMELESS_PEER_HUID);
+    expect(resolved?.peer).toBeUndefined();
+  });
+
+  it('групповой чат не трогается и в справку не попадает', async () => {
+    const probe = createPeerProbe();
+    const group = normalizeChat(
+      makeRawChat({
+        chatId: OTHER_CHAT_ID,
+        name: 'Дежурка',
+        chatType: 'group_chat',
+        memberHuids: [MY_HUID, PEER_HUID],
+      }),
+    );
+
+    const resolved = await resolvePeerNames(probe.deps, [
+      group!,
+      personalChat(POLYGON_CHAT_ID, [MY_HUID, PEER_HUID]),
+    ]);
+
+    expect(resolved[0]?.name).toBe('Дежурка');
+    expect(resolved[0]?.peer_huid).toBeUndefined();
+    expect(probe.rest.calls[0]?.huids).toEqual([PEER_HUID]);
+  });
+
+  it('без личных чатов справка не спрашивается и своя идентичность не читается', async () => {
+    const probe = createPeerProbe();
+    const group = normalizeChat(
+      makeRawChat({ chatId: OTHER_CHAT_ID, name: 'Дежурка', chatType: 'group_chat' }),
+    );
+
+    await resolvePeerNames(probe.deps, [group!]);
+
+    expect(probe.rest.calls).toHaveLength(0);
+    expect(probe.auth.calls.getWhoami).toBe(0);
+  });
+
+  it('чат не на двоих собеседника не даёт: гадать, кто из троих, нечем', async () => {
+    const probe = createPeerProbe();
+
+    const [resolved] = await resolvePeerNames(probe.deps, [
+      personalChat(POLYGON_CHAT_ID, [MY_HUID, PEER_HUID, NAMELESS_PEER_HUID]),
+    ]);
+
+    expect(resolved?.name).toBe('personal chat');
+    expect(resolved?.peer_huid).toBeUndefined();
+    expect(probe.rest.calls).toHaveLength(0);
+  });
+
+  it('весь список спрашивается одним обращением, а не по чату за раз', async () => {
+    const probe = createPeerProbe();
+
+    await resolvePeerNames(probe.deps, [
+      personalChat(POLYGON_CHAT_ID, [MY_HUID, PEER_HUID]),
+      personalChat(OTHER_CHAT_ID, [MY_HUID, NAMELESS_PEER_HUID]),
+    ]);
+
+    expect(probe.rest.calls).toHaveLength(1);
+    expect(probe.rest.calls[0]?.huids).toEqual([PEER_HUID, NAMELESS_PEER_HUID]);
   });
 });
 

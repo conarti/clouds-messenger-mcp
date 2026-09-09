@@ -25,6 +25,7 @@ const GROUP_CHAT: ChatRecord = {
   kind: 'group_chat',
   members_count: 2,
   key_ids: ['recipient-key-id-a', 'recipient-key-id-b'],
+  member_huids: [],
   is_self: false,
 };
 
@@ -33,6 +34,7 @@ const SELF_CHAT: ChatRecord = {
   name: 'Избранное',
   kind: 'notes',
   key_ids: ['recipient-key-id-a'],
+  member_huids: [],
   is_self: true,
 };
 
@@ -40,6 +42,7 @@ const NAMELESS_CHAT: ChatRecord = {
   chat_id: OTHER_CHAT_ID,
   kind: 'chat',
   key_ids: [],
+  member_huids: [],
   is_self: false,
 };
 

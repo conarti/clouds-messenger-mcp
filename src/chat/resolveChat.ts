@@ -10,15 +10,24 @@
  * чатов. Никакой склейки идентификаторов участников: у Клаудс сервер выдаёт единый UUID
  * на чат любого вида, включая чат с собой, поэтому собирать адрес самому не из чего и
  * незачем.
+ *
+ * ЛИЧНЫЙ ЧАТ АДРЕСУЕТСЯ ИМЕНЕМ ЧЕЛОВЕКА. На проводе у всех личных чатов одно и то же имя,
+ * поэтому перед сравнением список проходит резолв имён собеседников: без него запрос по
+ * фамилии не совпал бы ни с чем, а запрос «personal chat» совпал бы со всеми сразу.
  */
 import {
   SELF_CHAT_TYPE,
   normalizeChats,
+  resolvePeerNames,
   sortChatsByFreshness,
   type ChatRecord,
+  type PeerNamesDeps,
 } from '../protocol/chatShape.js';
 import { fetchChatList, type ChatListDeps } from '../protocol/chatList.js';
 import { UUID_PATTERN } from '../protocol/messageShape.js';
+
+/** Резолв ходит и за списком чатов, и за именами собеседников: без второго людей не найти */
+export type ResolveChatDeps = ChatListDeps & PeerNamesDeps;
 
 /**
  * Имена чата с собой. Список закрытый и на двух языках: модель адресует «Избранное» по
@@ -54,6 +63,23 @@ function toChatCandidate(chat: ChatRecord): ChatCandidate {
 /** Ветка «ноль совпадений» недостижима там, где список уже отфильтрован непустым */
 const NO_MATCH_REASON = 'совпадений не нашлось';
 
+/** Слова строки без пустых: разделителями считаются пробелы и запятые */
+function wordsOf(value: string): string[] {
+  return value
+    .toLowerCase()
+    .split(/[\s,]+/)
+    .filter((word) => word.length > 0);
+}
+
+/** Все слова запроса встречаются в имени, порядок при этом не важен */
+function containsAllWords(name: string | undefined, queryWords: readonly string[]): boolean {
+  if (name === undefined || queryWords.length === 0) {
+    return false;
+  }
+  const nameWords = new Set(wordsOf(name));
+  return queryWords.every((word) => nameWords.has(word));
+}
+
 /** Один кандидат это разрешение, несколько это неоднозначность, ноль это промах */
 function decide(matched: readonly ChatRecord[], reason: string): ResolveChatResult {
   const single = matched[0];
@@ -66,13 +92,16 @@ function decide(matched: readonly ChatRecord[], reason: string): ResolveChatResu
   return { kind: 'not_found', reason };
 }
 
-export async function resolveChat(deps: ChatListDeps, query: string): Promise<ResolveChatResult> {
+export async function resolveChat(deps: ResolveChatDeps, query: string): Promise<ResolveChatResult> {
   const trimmed = query.trim();
   if (trimmed.length === 0) {
     return { kind: 'not_found', reason: 'пустой запрос: адресовать чат нечем' };
   }
 
-  const chats = sortChatsByFreshness(normalizeChats(await fetchChatList(deps)));
+  const chats = await resolvePeerNames(
+    deps,
+    sortChatsByFreshness(normalizeChats(await fetchChatList(deps))),
+  );
 
   if (isChatId(trimmed)) {
     const exact = chats.find((chat) => chat.chat_id.toLowerCase() === trimmed.toLowerCase());
@@ -97,6 +126,7 @@ export async function resolveChat(deps: ChatListDeps, query: string): Promise<Re
   }
 
   const lowered = trimmed.toLowerCase();
+  const queryWords = wordsOf(trimmed);
   /*
    * Точное имя старше подстроки: чат «Дежурка» не должен становиться неоднозначным только
    * потому, что рядом живёт «Дежурка резерв».
@@ -106,8 +136,19 @@ export async function resolveChat(deps: ChatListDeps, query: string): Promise<Re
     return decide(exactByName, NO_MATCH_REASON);
   }
 
+  const bySubstring = chats.filter((chat) => chat.name?.toLowerCase().includes(lowered) === true);
+  if (bySubstring.length > 0) {
+    return decide(bySubstring, NO_MATCH_REASON);
+  }
+
+  /*
+   * Последняя попытка: сравнение по множеству слов. Человека называют и «Фамилия Имя», и
+   * «Имя Фамилия», а в справке имя записано одним порядком, и подстрока второй порядок не
+   * ловит. Отчество при этом мешать не должно, поэтому слова запроса обязаны входить в
+   * имя, а не совпадать с ним целиком.
+   */
   return decide(
-    chats.filter((chat) => chat.name?.toLowerCase().includes(lowered) === true),
-    `ни один чат не совпал с запросом «${trimmed}» ни точным именем, ни подстрокой`,
+    chats.filter((chat) => containsAllWords(chat.name, queryWords)),
+    `ни один чат не совпал с запросом «${trimmed}» ни точным именем, ни подстрокой, ни набором слов`,
   );
 }

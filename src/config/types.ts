@@ -23,6 +23,11 @@ export interface ProtocolConfig {
   /** Путь KDC относительно restBaseUrl; полный URL собирает RestClient (Принцип 1) */
   kdcKeysPath: string;
   /**
+   * Путь справки о профилях по huid относительно restBaseUrl. Ручка принимает POST с
+   * телом из списка huid и отвечает группами по серверам (наблюдено живьём).
+   */
+  phonebookProfilesPath: string;
+  /**
    * Путь файловой службы относительно restBaseUrl, к нему клеятся идентификатор чата и
    * идентификатор файла. Форма снята с бандла веб-клиента и живой пробой не подтверждена.
    */
@@ -55,6 +60,12 @@ export interface LimitsConfig {
   listChatsDefaultLimit: number;
   searchDefaultLimit: number;
   historyDefaultLimit: number;
+  /**
+   * Срок жизни записи кэша профилей. Имена людей меняются раз в годы, а список чатов
+   * читается десятками вызовов подряд, поэтому кэш здесь не оптимизация, а способ не
+   * спрашивать справочник об одних и тех же людях на каждый вызов. Ноль ВЫКЛЮЧАЕТ кэш.
+   */
+  profileCacheTtlMs: number;
 }
 
 export interface AuthConfig {

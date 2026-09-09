@@ -5,23 +5,55 @@
  * из совпавших» выглядит удобством на чтении и превращается в сообщение не тому человеку,
  * как только тем же резолвом начинает пользоваться отправка.
  */
-import { describe, expect, it } from 'vitest';
-import { resolveChat } from '../../src/chat/resolveChat.js';
+import { beforeEach, describe, expect, it } from 'vitest';
+import { FakeAuthProvider } from '../../src/auth/FakeAuthProvider.js';
+import { resolveChat, type ResolveChatDeps } from '../../src/chat/resolveChat.js';
 import { resolveFailure } from '../../src/chat/resolveFailure.js';
-import { CHAT_LIST_EVENT, type ChatListDeps } from '../../src/protocol/chatList.js';
+import { CHAT_LIST_EVENT } from '../../src/protocol/chatList.js';
+import { resetProfileCache } from '../../src/protocol/profiles.js';
 import type { PhoenixClient } from '../../src/transport/ws/types.js';
 import { createLogger } from '../../src/util/logger.js';
-import { makeRawChat, OTHER_CHAT_ID, POLYGON_CHAT_ID } from '../helpers/readFixtures.js';
+import { FakeProfilesRest } from '../helpers/fakeRest.js';
+import {
+  makeRawChat,
+  MY_HUID,
+  NAMELESS_PEER_HUID,
+  OTHER_CHAT_ID,
+  PEER_HUID,
+  POLYGON_CHAT_ID,
+  SECOND_PEER_HUID,
+  type ProfileFixture,
+} from '../helpers/readFixtures.js';
 import { createTestConfig } from '../helpers/testConfig.js';
 
 const THIRD_CHAT_ID = '7f1c2d3e-4a5b-4c6d-8e9f-0a1b2c3d4e5f';
+const PERSONAL_CHAT_ID = '8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d';
+const SECOND_PERSONAL_CHAT_ID = '9b2c3d4e-5f6a-4b7c-8d8e-0f1a2b3c4d5e';
+const NAMELESS_CHAT_ID = 'ac3d4e5f-6a7b-4c8d-89ef-1a2b3c4d5e6f';
 
-function createDeps(chats: unknown[]): ChatListDeps {
+/** Имена синтетические: фикстуры лежат в репозитории, живым именам там не место */
+const PROFILES: ProfileFixture[] = [
+  {
+    huid: PEER_HUID,
+    name: 'Тестов Тест Тестович',
+    companyPosition: 'Инженер',
+    department: 'Отдел проб',
+  },
+  { huid: SECOND_PEER_HUID, name: 'Тестов Пётр Петрович' },
+];
+
+function createDeps(chats: unknown[], profiles: ProfileFixture[] = PROFILES): ResolveChatDeps {
   const ws: PhoenixClient = {
     request: (async () => ({ [CHAT_LIST_EVENT]: chats })) as PhoenixClient['request'],
     close: async () => undefined,
   };
-  return { ws, config: createTestConfig(), logger: createLogger({ level: 'error' }) };
+  return {
+    ws,
+    rest: new FakeProfilesRest(profiles),
+    auth: new FakeAuthProvider({ huid: MY_HUID }),
+    config: createTestConfig(),
+    logger: createLogger({ level: 'error' }),
+  };
 }
 
 const CHATS = [
@@ -29,6 +61,33 @@ const CHATS = [
   makeRawChat({ chatId: OTHER_CHAT_ID, name: 'Дежурка', chatType: 'group_chat' }),
   makeRawChat({ chatId: THIRD_CHAT_ID, name: 'Дежурка резерв', chatType: 'group_chat' }),
 ];
+
+/** Личные чаты приезжают с сервера под одним и тем же именем: имена дают профили */
+const PERSONAL_CHATS = [
+  makeRawChat({
+    chatId: PERSONAL_CHAT_ID,
+    name: 'personal chat',
+    chatType: 'chat',
+    memberHuids: [MY_HUID, PEER_HUID],
+  }),
+  makeRawChat({
+    chatId: SECOND_PERSONAL_CHAT_ID,
+    name: 'personal chat',
+    chatType: 'chat',
+    memberHuids: [MY_HUID, SECOND_PEER_HUID],
+  }),
+  makeRawChat({
+    chatId: NAMELESS_CHAT_ID,
+    name: 'personal chat',
+    chatType: 'chat',
+    memberHuids: [MY_HUID, NAMELESS_PEER_HUID],
+  }),
+];
+
+/** Кэш профилей живёт на процесс, и соседние проверки не должны подсказывать друг другу */
+beforeEach(() => {
+  resetProfileCache();
+});
 
 describe('адресация идентификатором', () => {
   it('точное совпадение UUID даёт разрешение без поиска по имени', async () => {
@@ -98,6 +157,38 @@ describe('адресация именем', () => {
   it('ноль совпадений это промах, а пустой запрос это промах ещё до списка', async () => {
     expect((await resolveChat(createDeps(CHATS), 'бухгалтерия')).kind).toBe('not_found');
     expect((await resolveChat(createDeps(CHATS), '   ')).kind).toBe('not_found');
+  });
+});
+
+describe('адресация именем человека', () => {
+  it('личный чат находится по фамилии собеседника, а не по серверной заглушке имени', async () => {
+    const resolved = await resolveChat(createDeps(PERSONAL_CHATS), 'Тестович');
+
+    expect(resolved.kind).toBe('resolved');
+    expect(resolved.kind === 'resolved' && resolved.chat.chat_id).toBe(PERSONAL_CHAT_ID);
+  });
+
+  it('порядок слов не мешает: запрос «Имя Фамилия» находит имя «Фамилия Имя»', async () => {
+    const resolved = await resolveChat(createDeps(PERSONAL_CHATS), 'Тест Тестов');
+
+    expect(resolved.kind).toBe('resolved');
+    expect(resolved.kind === 'resolved' && resolved.chat.chat_id).toBe(PERSONAL_CHAT_ID);
+  });
+
+  it('общая фамилия это неоднозначность с именами кандидатов, а не выбор свежего', async () => {
+    const resolved = await resolveChat(createDeps(PERSONAL_CHATS), 'Тестов');
+
+    expect(resolved.kind).toBe('ambiguous');
+    expect(resolved.kind === 'ambiguous' && resolved.candidates).toEqual([
+      { chat_id: PERSONAL_CHAT_ID, name: 'Тестов Тест Тестович', kind: 'chat' },
+      { chat_id: SECOND_PERSONAL_CHAT_ID, name: 'Тестов Пётр Петрович', kind: 'chat' },
+    ]);
+  });
+
+  it('чат без профиля собеседника именем человека не адресуется и остаётся безымянным', async () => {
+    const resolved = await resolveChat(createDeps(PERSONAL_CHATS), 'Неизвестный');
+
+    expect(resolved.kind).toBe('not_found');
   });
 });
 

@@ -1,10 +1,12 @@
 /**
  * `search`: поиск чатов по имени и людей по контактам.
  *
- * ИЩЕТ ПО СПИСКУ ЧАТОВ, А НЕ НА СЕРВЕРЕ. Серверной ручки поиска у Клаудс не снято ни
- * живой пробой, ни с бандла веб-клиента, поэтому единственный честный источник это тот же
- * список чатов, которым живёт `list_chats`. Выдумывать несуществующий запрос к серверу
- * ради красивой формы инструмента нельзя: он молча вернул бы отказ на первом же вызове.
+ * ИЩЕТ ПО СПИСКУ ЧАТОВ, А НЕ НА СЕРВЕРЕ. Глобального серверного поиска людей по строке у
+ * платформы нет: справка о профилях спрашивается списком идентификаторов и отвечает только
+ * про них, а веб-клиент ищет людей локально. Поэтому единственный честный источник это тот
+ * же список чатов, которым живёт `list_chats`, дополненный именами собеседников. Выдумывать
+ * несуществующий запрос к серверу ради красивой формы инструмента нельзя: он молча вернул
+ * бы отказ на первом же вызове.
  *
  * ПО ТЕКСТАМ СООБЩЕНИЙ ПОИСКА НЕТ, И ЭТО ГОВОРИТСЯ ВСЛУХ. Запрос `entities: ['messages']`
  * не возвращает пустой успех: пустая выдача читается агентом как факт «ничего не найдено»,
@@ -12,7 +14,8 @@
  * `escalation` с причиной и следующим шагом, и агент уходит в `get_history` с датами.
  *
  * ЦЕНА ВЫЗОВА. Один кадр за список чатов; ещё один за счётчики непрочитанного, но только
- * когда спрошены чаты. Счётчик не подставляется нулём «за неимением»: ноль в поле
+ * когда спрошены чаты; плюс запрос справки о профилях, если в списке есть личные чаты и
+ * их имена ещё не в кэше. Счётчик не подставляется нулём «за неимением»: ноль в поле
  * непрочитанного это утверждение «всё прочитано», а не признание незнания.
  */
 import { z } from 'zod';
@@ -20,12 +23,19 @@ import { DEFAULT_LIMITS } from '../../config/defaults.js';
 import { fetchChatList, fetchUnreadCounters, type ChatListDeps } from '../../protocol/chatList.js';
 import {
   normalizeChats,
+  resolvePeerNames,
   sortChatsByFreshness,
   toPublicChat,
   type Chat,
   type ChatRecord,
+  type PeerNamesDeps,
 } from '../../protocol/chatShape.js';
-import { matchesChatName, toContactHit, type ContactHit } from '../../protocol/search.js';
+import {
+  matchesChatName,
+  matchesContact,
+  toContactHit,
+  type ContactHit,
+} from '../../protocol/search.js';
 
 /** Что искать. Значения перечислены здесь же, потому что схема инструмента их и объявляет */
 export type SearchEntity = 'users' | 'chats' | 'messages';
@@ -69,29 +79,33 @@ const MESSAGES_ESCALATION: SearchEscalation = {
 };
 
 const CONTACTS_PARTIAL_REASON =
-  'поиск людей идёт только по контактам с существующим личным чатом; серверный справочник ' +
-  'не подключён';
+  'глобального серверного поиска людей нет, ищем по контактам с личным чатом; справочник ' +
+  'corporate_directory/entries не подключён';
 
 /**
- * Зависимости сужены до списка чатов: этот инструмент не расшифровывает и не ходит в REST.
- * Полный набор зависимостей сервера сюда подходит по построению, а проверке не приходится
- * собирать крипто и авторизацию ради поиска по именам.
+ * Зависимости сужены до списка чатов и справки о профилях: этот инструмент не
+ * расшифровывает сообщения и не поднимает крипто. Полный набор зависимостей сервера
+ * подходит сюда по построению.
  */
-export type SearchDeps = ChatListDeps;
+export type SearchDeps = ChatListDeps & PeerNamesDeps;
 
 /** Определение для регистрации: сервер передаёт его вторым аргументом в registerTool */
 export const SEARCH_TOOL_DEFINITION = {
   title: 'Search chats and contacts',
   description:
-    'Поиск чатов по имени и людей по контактам, у которых уже есть личный чат. Ищет ПО СПИСКУ ' +
-    'ЧАТОВ: серверного справочника людей у платформы не снято, поэтому выдача людей помечается ' +
-    'partial. Поиска по текстам сообщений НЕТ: запрос messages возвращает escalation со ' +
-    'следующим шагом, а не пустую выдачу. Стоит один вызов к серверу, а с чатами два.',
+    'Поиск чатов по имени и людей по контактам, у которых уже есть личный чат. Люди ищутся по ' +
+    'имени собеседника, должности и подразделению. Ищет ПО СПИСКУ ЧАТОВ: глобального ' +
+    'серверного поиска людей у платформы нет, поэтому выдача людей помечается partial. ' +
+    'Поиска по текстам сообщений НЕТ: запрос messages возвращает escalation со следующим ' +
+    'шагом, а не пустую выдачу. Стоит один вызов к серверу, а с чатами два, плюс справка об ' +
+    'именах собеседников с кэшем.',
   inputSchema: {
     query: z
       .string()
       .min(1)
-      .describe('Подстрока имени чата либо имени собеседника; регистр не важен'),
+      .describe(
+        'Подстрока имени чата, имени собеседника, должности или подразделения; регистр не важен',
+      ),
     entities: z
       .array(z.enum(['users', 'chats', 'messages']))
       .optional()
@@ -118,12 +132,12 @@ export const SEARCH_TOOL_DEFINITION = {
  * Пустой запрос не совпадает ни с чем, хотя пустая подстрока входит в любую строку: выдать
  * на пустом запросе весь список значит выдать `list_chats` за результат поиска.
  */
-async function matchingChats(deps: SearchDeps, loweredQuery: string): Promise<ChatRecord[]> {
+async function knownChats(deps: SearchDeps, loweredQuery: string): Promise<ChatRecord[]> {
   if (loweredQuery.length === 0) {
     return [];
   }
-  const records = sortChatsByFreshness(normalizeChats(await fetchChatList(deps)));
-  return records.filter((chat) => matchesChatName(chat, loweredQuery));
+  /* Имена собеседников подставляются до отбора: иначе человека не найти ни в одной выдаче */
+  return resolvePeerNames(deps, sortChatsByFreshness(normalizeChats(await fetchChatList(deps))));
 }
 
 export async function search(deps: SearchDeps, input: SearchInput): Promise<SearchResult> {
@@ -133,17 +147,24 @@ export async function search(deps: SearchDeps, input: SearchInput): Promise<Sear
   const wantsUsers = entities.includes('users');
   const escalation = entities.includes('messages') ? MESSAGES_ESCALATION : undefined;
 
-  const matched =
-    wantsChats || wantsUsers ? await matchingChats(deps, input.query.trim().toLowerCase()) : [];
+  const loweredQuery = input.query.trim().toLowerCase();
+  const known = wantsChats || wantsUsers ? await knownChats(deps, loweredQuery) : [];
+  const matched = known.filter((chat) => matchesChatName(chat, loweredQuery));
 
   let truncated = false;
 
   let users: ContactHit[] | undefined;
   if (wantsUsers) {
-    const contacts = matched.flatMap((chat) => {
-      const contact = toContactHit(chat);
-      return contact === undefined ? [] : [contact];
-    });
+    /*
+     * Люди отбираются шире чатов: должность и подразделение это тоже способ назвать
+     * человека, а имени чата у них нет, поэтому общий отбор по имени их бы не поймал.
+     */
+    const contacts = known
+      .filter((chat) => matchesContact(chat, loweredQuery))
+      .flatMap((chat) => {
+        const contact = toContactHit(chat);
+        return contact === undefined ? [] : [contact];
+      });
     users = contacts.slice(0, limit);
     truncated = truncated || contacts.length > limit;
   }

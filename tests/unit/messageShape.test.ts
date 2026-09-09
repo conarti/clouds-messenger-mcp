@@ -11,9 +11,11 @@ import { enrichMessage } from '../../src/protocol/enrichMessage.js';
 import { UUID_PATTERN, normalizeEvent } from '../../src/protocol/messageShape.js';
 import {
   makeInnerImage,
+  makeInnerLink,
   makeInnerText,
   makeRawChat,
   MY_HUID,
+  PEER_HUID,
   POLYGON_CHAT_ID,
 } from '../helpers/readFixtures.js';
 
@@ -82,6 +84,119 @@ describe('текстовое сообщение', () => {
     expect(message?.type).toBeUndefined();
     expect(message?.from).toBe(MY_HUID);
     expect(message?.timestamp).toBe('2026-09-08T07:14:30.370Z');
+  });
+});
+
+describe('сообщение со ссылкой', () => {
+  const inner = makeInnerLink({
+    msgId: '5b2c8e10-7d44-4c1a-8f9b-2a6e0c3d5f83',
+    from: MY_HUID,
+    timestamp: '2026-09-08T07:16:00.000Z',
+    groupChatId: POLYGON_CHAT_ID,
+    body: MESSAGE_TEXT,
+    url: 'https://example.test/страница',
+  });
+
+  /*
+   * Предпосылка живой пробы: у события со ссылкой текст лежит там же, где у текстового.
+   * Отбор текста по типу события оставлял такие сообщения пустыми, и заметно это было
+   * только на живой переписке.
+   */
+  it('текст берётся из body, хотя тип события не text', () => {
+    const message = normalizeEvent(rawEvent(), { inner });
+
+    expect(message?.type).toBe('link');
+    expect(message?.text).toBe(MESSAGE_TEXT);
+  });
+
+  it('адрес ссылки уезжает отдельным полем, а не подмешивается в текст', () => {
+    const message = normalizeEvent(rawEvent(), { inner });
+
+    expect(message?.link).toEqual({ url: 'https://example.test/страница' });
+    expect(message?.text).not.toContain('https://example.test');
+  });
+
+  it('у текстового события поля ссылки нет вовсе', () => {
+    const message = normalizeEvent(rawEvent(), {
+      inner: makeInnerText({
+        msgId: '5b2c8e10-7d44-4c1a-8f9b-2a6e0c3d5f84',
+        from: MY_HUID,
+        timestamp: '2026-09-08T07:16:30.000Z',
+        groupChatId: POLYGON_CHAT_ID,
+        body: MESSAGE_TEXT,
+      }),
+    });
+
+    expect(Object.keys(message ?? {})).not.toContain('link');
+  });
+});
+
+describe('упоминания', () => {
+  const MENTION_ID = 'a1b2c3d4-0000-4000-8000-000000000001';
+
+  function withMention(body: string): Record<string, unknown> {
+    return makeInnerText({
+      msgId: '5b2c8e10-7d44-4c1a-8f9b-2a6e0c3d5f85',
+      from: MY_HUID,
+      timestamp: '2026-09-08T07:17:00.000Z',
+      groupChatId: POLYGON_CHAT_ID,
+      body,
+      mentions: [{ mentionId: MENTION_ID, huid: PEER_HUID, name: 'Тестов Тест Тестович' }],
+    });
+  }
+
+  /* Предпосылка живой пробы: в теле стоит плейсхолдер, а имя лежит рядом в mention_data */
+  it('плейсхолдер в тексте заменяется именем из того же события', () => {
+    const message = normalizeEvent(rawEvent(), {
+      inner: withMention(`@{mention:${MENTION_ID}} посмотри, пожалуйста`),
+    });
+
+    expect(message?.text).toBe('@Тестов Тест Тестович посмотри, пожалуйста');
+  });
+
+  it('упомянутые адресаты уезжают списком адресов и имён', () => {
+    const message = normalizeEvent(rawEvent(), { inner: withMention('привет') });
+
+    expect(message?.mentions).toEqual([{ huid: PEER_HUID, name: 'Тестов Тест Тестович' }]);
+  });
+
+  it('без упоминаний поля нет вовсе, а не пустого массива', () => {
+    const message = normalizeEvent(rawEvent(), {
+      inner: makeInnerText({
+        msgId: '5b2c8e10-7d44-4c1a-8f9b-2a6e0c3d5f86',
+        from: MY_HUID,
+        timestamp: '2026-09-08T07:17:30.000Z',
+        groupChatId: POLYGON_CHAT_ID,
+        body: MESSAGE_TEXT,
+      }),
+    });
+
+    expect(Object.keys(message ?? {})).not.toContain('mentions');
+  });
+
+  /* Незнакомый идентификатор остаётся как есть: подставить туда имя значило бы его выдумать */
+  it('плейсхолдер без своего упоминания не подменяется наугад', () => {
+    const message = normalizeEvent(rawEvent(), {
+      inner: withMention('@{mention:00000000-0000-4000-8000-00000000dead} привет'),
+    });
+
+    expect(message?.text).toBe('@{mention:00000000-0000-4000-8000-00000000dead} привет');
+  });
+
+  it('упоминание без адресата называет текст, но в список адресатов не попадает', () => {
+    const message = normalizeEvent(rawEvent(), {
+      inner: makeInnerText({
+        msgId: '5b2c8e10-7d44-4c1a-8f9b-2a6e0c3d5f87',
+        from: MY_HUID,
+        timestamp: '2026-09-08T07:18:00.000Z',
+        groupChatId: POLYGON_CHAT_ID,
+        body: `@{mention:${MENTION_ID}} общий вопрос`,
+        mentions: [{ mentionId: MENTION_ID, name: 'Дежурка', mentionType: 'all' }],
+      }),
+    });
+
+    expect(message?.text).toBe('@Дежурка общий вопрос');
+    expect(Object.keys(message ?? {})).not.toContain('mentions');
   });
 });
 

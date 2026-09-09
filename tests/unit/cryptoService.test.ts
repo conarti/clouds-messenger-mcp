@@ -37,6 +37,9 @@ function makeService() {
     getJson: vi.fn(async () => {
       throw new Error('getJson здесь не участвует');
     }),
+    postJson: vi.fn(async () => {
+      throw new Error('postJson здесь не участвует');
+    }),
     getKdcKeys,
   };
   return {

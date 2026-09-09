@@ -94,6 +94,7 @@ function createDeps(responder: Responder): { deps: ToolDeps; calls: RecordedCall
   };
   const rest: RestClient = {
     getJson: forbidden('rest.getJson'),
+    postJson: forbidden('rest.postJson'),
     getKdcKeys: forbidden('rest.getKdcKeys'),
   };
   const auth: AuthProvider = {

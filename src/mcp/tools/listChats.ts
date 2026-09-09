@@ -4,9 +4,12 @@
  *
  * ЦЕНА ВЫЗОВА. Базовый вызов стоит ДВА кадра: список чатов и счётчики непрочитанного.
  * Счётчики приезжают отдельным событием, а не полем чата, поэтому свести их к одному
- * кадру нельзя. Опт-ин на текст последнего сообщения стоит ЕЩЁ ПО ОДНОМУ кадру на каждый
- * чат страницы, и это названо прямо в описании инструмента: цена, спрятанная от модели,
- * платится всё равно, только неожиданно.
+ * кадру нельзя. Плюс ОДИН запрос справки о профилях, если в списке есть личные чаты: без
+ * него все они называются одинаковой серверной заглушкой. Справка спрашивается батчем на
+ * весь список и кэшируется, поэтому следующие вызовы её не повторяют. Опт-ин на текст
+ * последнего сообщения стоит ЕЩЁ ПО ОДНОМУ кадру на каждый чат страницы, и это названо
+ * прямо в описании инструмента: цена, спрятанная от модели, платится всё равно, только
+ * неожиданно.
  *
  * ПРИВАТНОСТЬ ПО УМОЛЧАНИЮ. Текст последних сообщений не отдаётся: один вызов иначе тащил
  * бы в контекст модели содержимое всех переписок сразу.
@@ -14,6 +17,7 @@
 import { fetchChatList, fetchUnreadCounters } from '../../protocol/chatList.js';
 import {
   normalizeChats,
+  resolvePeerNames,
   sortChatsByFreshness,
   toPublicChat,
   type Chat,
@@ -57,7 +61,15 @@ async function fetchLastMessage(
 export async function listChats(deps: ToolDeps, input: ListChatsInput = {}): Promise<ListChatsResult> {
   const limit = input.limit ?? deps.config.limits.listChatsDefaultLimit;
 
-  const records = sortChatsByFreshness(normalizeChats(await fetchChatList(deps)));
+  /*
+   * Имена собеседников подставляются ДО фильтрации и среза. Иначе `unread_only` и `limit`
+   * работали бы по серверной заглушке имени, одинаковой у всех личных чатов, и страница
+   * получалась бы правильной по числу и бессмысленной по содержанию.
+   */
+  const records = await resolvePeerNames(
+    deps,
+    sortChatsByFreshness(normalizeChats(await fetchChatList(deps))),
+  );
   const counters = await fetchUnreadCounters(
     deps,
     records.map((record) => record.chat_id),

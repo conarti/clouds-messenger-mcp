@@ -80,6 +80,7 @@ function createHarness(options: { withSenderKey?: boolean } = {}): Harness {
   const kdcRequests: string[][] = [];
   const rest: RestClient = {
     getJson: vi.fn(forbidden('rest.getJson')),
+    postJson: vi.fn(forbidden('rest.postJson')),
     async getKdcKeys(ids: readonly string[]): Promise<KdcKey[]> {
       kdcRequests.push([...ids]);
       return ids.flatMap((keyId) => {

@@ -66,6 +66,7 @@ function createDeps(
   };
   const rest: RestClient = {
     getJson: forbidden('rest.getJson'),
+    postJson: forbidden('rest.postJson'),
     getKdcKeys: forbidden('rest.getKdcKeys'),
   };
   const auth: AuthProvider = {

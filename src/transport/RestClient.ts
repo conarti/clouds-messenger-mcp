@@ -1,5 +1,5 @@
 /**
- * REST-транспорт: GET с bearer и cookie одновременно.
+ * REST-транспорт: GET и читающий POST с bearer и cookie одновременно.
  *
  * Оба заголовка обязательны вместе (наблюдение Фазы 0): bearer авторизует вызов, cookie
  * подтверждает сессию, и без второго сервер отвечает отказом даже на свежий токен.
@@ -12,9 +12,13 @@
  * отказа. Второй 401 уже поднимается наверх: повторять дальше означало бы молотить сервер
  * входом по кругу.
  *
- * Ответ 429 это не отказ, а просьба подождать, и на GET она уважается тем же способом:
- * пауза указанной сервером длины и ровно один повтор. Единица паузы не установлена и
+ * Ответ 429 это не отказ, а просьба подождать, и она уважается тем же способом: пауза
+ * указанной сервером длины и ровно один повтор. Единица паузы не установлена и
  * разбирается в `rateLimit`.
+ *
+ * POST здесь не запись, а запрос справки: ручка профилей по huid принимает список
+ * идентификаторов телом, потому что в query он не помещается. Ничего на сервере такой
+ * вызов не меняет, поэтому повторы у него те же, что у GET.
  */
 import { AuthError, type AuthProvider } from '../auth/AuthProvider.js';
 import type { Config } from '../config/types.js';
@@ -153,6 +157,14 @@ function toKdcKey(row: unknown, index: number): KdcKey {
   };
 }
 
+/** Один вызов целиком: методом различаются кадр и заголовки, политика повторов общая */
+interface RestRequest {
+  method: 'GET' | 'POST';
+  path: string;
+  query?: Record<string, string>;
+  body?: unknown;
+}
+
 export class HttpRestClient implements RestClient {
   private readonly doFetch: typeof fetch;
   private readonly doSleep: (ms: number) => Promise<void>;
@@ -163,30 +175,15 @@ export class HttpRestClient implements RestClient {
   }
 
   async getJson<T>(path: string, query?: Record<string, string>): Promise<T> {
-    try {
-      return await this.attempt<T>(path, query);
-    } catch (error) {
-      /*
-       * Просьба подождать это не отказ: GET идемпотентен, поэтому повтор после паузы
-       * безопасен. Повтор ровно один: сервер, повторивший просьбу, имеет в виду не паузу,
-       * а исчерпанную квоту, и дальнейшие попытки только тратят её остаток.
-       */
-      if (error instanceof RateLimitError) {
-        this.deps.logger?.warn('rest: лимит частоты, пауза и один повтор', {
-          path,
-          pauseMs: error.pauseMs,
-        });
-        await this.doSleep(error.pauseMs);
-        return this.attempt<T>(path, query);
-      }
-      if (!(error instanceof AuthError) || error.kind !== 'bearer') {
-        throw error;
-      }
-      this.deps.logger?.warn('rest: bearer отвергнут, сброс кэша авторизации и один повтор', { path });
-      await this.deps.auth.onAuthFailure();
-      /* Второй отказ уходит наверх как AuthError: дело не в протухшем токене */
-      return this.attempt<T>(path, query);
-    }
+    return this.send<T>({ method: 'GET', path, ...(query !== undefined ? { query } : {}) });
+  }
+
+  /**
+   * POST с телом в JSON. Повторы те же, что у GET, и по той же причине: единственный
+   * POST этого клиента это запрос справки, который ничего не меняет на сервере.
+   */
+  async postJson<T>(path: string, body: unknown): Promise<T> {
+    return this.send<T>({ method: 'POST', path, body });
   }
 
   async getKdcKeys(ids: readonly string[]): Promise<KdcKey[]> {
@@ -205,7 +202,44 @@ export class HttpRestClient implements RestClient {
     return rows.map(toKdcKey);
   }
 
-  private async attempt<T>(path: string, query?: Record<string, string>): Promise<T> {
+  /**
+   * Общий путь обоих методов: одна попытка, разбор отказа, ровно один повтор.
+   *
+   * Повторы живут здесь, а не в каждом методе, потому что различаются методы кадром, а не
+   * политикой: и протухший bearer, и просьба подождать лечатся одинаково, и разъехавшиеся
+   * копии этой политики означали бы, что один из путей молотит сервер, а второй нет.
+   */
+  private async send<T>(request: RestRequest): Promise<T> {
+    try {
+      return await this.attempt<T>(request);
+    } catch (error) {
+      /*
+       * Просьба подождать это не отказ: оба вызова читающие, поэтому повтор после паузы
+       * безопасен. Повтор ровно один: сервер, повторивший просьбу, имеет в виду не паузу,
+       * а исчерпанную квоту, и дальнейшие попытки только тратят её остаток.
+       */
+      if (error instanceof RateLimitError) {
+        this.deps.logger?.warn('rest: лимит частоты, пауза и один повтор', {
+          path: request.path,
+          pauseMs: error.pauseMs,
+        });
+        await this.doSleep(error.pauseMs);
+        return this.attempt<T>(request);
+      }
+      if (!(error instanceof AuthError) || error.kind !== 'bearer') {
+        throw error;
+      }
+      this.deps.logger?.warn('rest: bearer отвергнут, сброс кэша авторизации и один повтор', {
+        path: request.path,
+      });
+      await this.deps.auth.onAuthFailure();
+      /* Второй отказ уходит наверх как AuthError: дело не в протухшем токене */
+      return this.attempt<T>(request);
+    }
+  }
+
+  private async attempt<T>(request: RestRequest): Promise<T> {
+    const { method, path, query, body } = request;
     const [bearer, cookieHeader] = await Promise.all([
       this.deps.auth.getBearer(),
       this.deps.auth.getCookieHeader(),
@@ -217,13 +251,15 @@ export class HttpRestClient implements RestClient {
     }
 
     const response = await this.doFetch(url.toString(), {
-      method: 'GET',
+      method,
       headers: {
         Authorization: `Bearer ${bearer}`,
         Cookie: cookieHeader,
         Accept: 'application/json',
         'User-Agent': this.deps.config.protocol.userAgent,
+        ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}),
       },
+      ...(method === 'POST' ? { body: JSON.stringify(body ?? {}) } : {}),
     });
 
     if (response.status === 401) {

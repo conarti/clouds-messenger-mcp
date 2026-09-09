@@ -7,6 +7,10 @@
  * времени в Клаудс арифметическим курсором не является, и любая правка адреса на единицу,
  * уместная на микросекундных метках Яндекса, здесь была бы порчей UUID.
  *
+ * ТЕКСТ БЕРЁТСЯ ИЗ `body`, А НЕ ИЗ ТИПА СОБЫТИЯ. Сообщение со ссылкой это отдельный
+ * внутренний тип с теми же полями, что у текстового, и текст у него лежит там же. Отбор по
+ * типу оставлял такие сообщения вообще без текста, поэтому решает наличие поля, а не имя типа.
+ *
  * СОБЫТИЕ НЕ ИСЧЕЗАЕТ ИЗ-ЗА НЕРАСШИФРОВКИ. Нечитаемое тело даёт `decrypt_error`, а не
  * пропуск: дыра в переписке читается вызывающим как факт, которого не было.
  */
@@ -21,6 +25,26 @@ import { extractReactions, type Reaction } from './reactions.js';
  * копии одного выражения разъедутся при первой же правке.
  */
 export const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Ссылка сообщения: только адрес; предпросмотр ссылки сервер отдаёт отдельным файлом */
+export interface MessageLink {
+  url: string;
+}
+
+/** Упомянутый человек: адрес и имя, которым его назвал отправитель */
+export interface Mention {
+  huid: string;
+  name: string;
+}
+
+/** `type` внутреннего события со ссылкой: текст в `body`, адрес в `payload.url` */
+const LINK_EVENT_TYPE = 'link';
+
+/**
+ * Плейсхолдер упоминания в тексте: `@{mention:<идентификатор>}`. Идентификатор ищется в
+ * `mentions` того же события, поэтому образец захватывает его целиком до закрывающей скобки.
+ */
+const MENTION_PLACEHOLDER = /@\{mention:([^}]+)\}/g;
 
 export interface Message {
   /** `sync_id` внешнего события: UUID, им же адресуются курсор и точечное чтение */
@@ -37,6 +61,10 @@ export interface Message {
   /** Тип ВНУТРЕННЕГО события (`text`, `image`, `file`): есть только у расшифрованного */
   type?: string;
   text?: string;
+  /** Ссылка события типа `link`: сам адрес, текст сообщения при этом лежит в `text` */
+  link?: MessageLink;
+  /** Упомянутые люди: есть, только если событие несёт упоминания */
+  mentions?: Mention[];
   attachments?: Attachment[];
   reactions?: Reaction[];
   read_by_count?: number;
@@ -62,6 +90,64 @@ function isoOrAbsent(value: unknown): string | undefined {
   }
 }
 
+/** Разобранные упоминания: имена для подстановки в текст и сами адресаты для выдачи */
+interface ParsedMentions {
+  names: Map<string, string>;
+  people: Mention[];
+}
+
+/**
+ * Упоминания внутреннего события.
+ *
+ * Имя и адрес берутся из `mention_data`, а ключом подстановки служит `mention_id`: именно
+ * он стоит в тексте. Упоминание без адреса (например, упоминание всего чата) в список
+ * адресатов не попадает, но именем в тексте подставляется: текст обязан читаться целиком.
+ */
+function parseMentions(inner: Record<string, unknown> | undefined): ParsedMentions {
+  const names = new Map<string, string>();
+  const people: Mention[] = [];
+  const raw = inner?.['mentions'];
+  if (!Array.isArray(raw)) {
+    return { names, people };
+  }
+  for (const entry of raw) {
+    const mention = asObject(entry);
+    const data = asObject(mention?.['mention_data']);
+    const name = stringOr(data?.['name']);
+    if (name === undefined) {
+      continue;
+    }
+    const mentionId = stringOr(mention?.['mention_id']);
+    if (mentionId !== undefined) {
+      names.set(mentionId, name);
+    }
+    const huid = stringOr(data?.['user_huid']);
+    if (huid !== undefined) {
+      people.push({ huid, name });
+    }
+  }
+  return { names, people };
+}
+
+/**
+ * Подставляет имена в плейсхолдеры упоминаний.
+ *
+ * Незнакомый идентификатор остаётся плейсхолдером КАК ЕСТЬ: имени у него нет, а подставить
+ * туда что-нибудь значило бы придумать адресата, которого в событии не было.
+ */
+function applyMentions(text: string, names: ReadonlyMap<string, string>): string {
+  return text.replace(MENTION_PLACEHOLDER, (placeholder, mentionId: string) => {
+    const name = names.get(mentionId);
+    return name === undefined ? placeholder : `@${name}`;
+  });
+}
+
+/** Адрес ссылки: он лежит в `payload.url`, а текст сообщения в `body` рядом */
+function linkOf(inner: Record<string, unknown> | undefined): MessageLink | undefined {
+  const url = stringOr(asObject(inner?.['payload'])?.['url']);
+  return url === undefined ? undefined : { url };
+}
+
 /**
  * Внешнее событие плюс расшифрованное внутреннее в единую форму.
  *
@@ -81,8 +167,15 @@ export function normalizeEvent(rawEvent: unknown, decrypted?: DecryptedPart): Me
   const from = stringOr(inner?.['from']) ?? stringOr(event['sender']);
   const timestamp = isoOrAbsent(inner?.['timestamp']) ?? isoOrAbsent(event['inserted_at']);
   const innerType = stringOr(inner?.['type']);
-  /* Текст живёт в `body` и только у текстового события: у файловых там `payload` */
-  const text = innerType === 'text' ? stringOr(inner?.['body']) : undefined;
+  /*
+   * Текст живёт в `body` у ЛЮБОГО события, которое его несёт: живьём это `text` и `link`,
+   * а у файловых событий поля `body` просто нет, и сверять тип отдельно незачем. Сверка по
+   * типу как раз и стоила сообщениям со ссылкой их текста: тип был не тот, текст был на месте.
+   */
+  const mentions = parseMentions(inner);
+  const rawText = stringOr(inner?.['body']);
+  const text = rawText === undefined ? undefined : applyMentions(rawText, mentions.names);
+  const link = innerType === LINK_EVENT_TYPE ? linkOf(inner) : undefined;
   /* Вложения и реакции разбираются своими модулями: их же читают инструменты напрямую */
   const attachments = extractAttachments(inner);
   const reactions = extractReactions(event);
@@ -97,6 +190,8 @@ export function normalizeEvent(rawEvent: unknown, decrypted?: DecryptedPart): Me
     event_type: stringOr(event['event_type']) ?? 'unknown',
     ...(innerType !== undefined ? { type: innerType } : {}),
     ...(text !== undefined ? { text } : {}),
+    ...(link !== undefined ? { link } : {}),
+    ...(mentions.people.length > 0 ? { mentions: mentions.people } : {}),
     ...(attachments.length > 0 ? { attachments } : {}),
     ...(reactions.length > 0 ? { reactions } : {}),
     ...(readByCount !== undefined ? { read_by_count: readByCount } : {}),

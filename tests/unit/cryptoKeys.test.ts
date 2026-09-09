@@ -22,6 +22,9 @@ function makeRest(bodies: Map<string, string>) {
     getJson: vi.fn(async () => {
       throw new Error('getJson в резолве ключей не участвует');
     }),
+    postJson: vi.fn(async () => {
+      throw new Error('postJson в резолве ключей не участвует');
+    }),
     getKdcKeys,
   };
   return { rest, getKdcKeys };

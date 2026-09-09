@@ -38,6 +38,7 @@ function createDeps(): ToolDeps {
   };
   const rest: RestClient = {
     getJson: vi.fn(forbidden('rest.getJson')),
+    postJson: vi.fn(forbidden('rest.postJson')),
     getKdcKeys: vi.fn(forbidden('rest.getKdcKeys')),
   };
   const auth: AuthProvider = {

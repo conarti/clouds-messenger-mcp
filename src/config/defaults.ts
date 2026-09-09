@@ -34,6 +34,8 @@ export const DEFAULT_PROTOCOL: ProtocolConfig = {
   chatListRequestVersion: 6,
   threadListRequestVersion: 2,
   kdcKeysPath: '/v1/kdc/keys/',
+  /* Форма снята живой пробой: POST с телом {huids:[...]}, ответ группами по серверам */
+  phonebookProfilesPath: '/v1/phonebook/cts_profiles/query',
   /*
    * Форма из бандла веб-клиента: GET <base>/v2/file_service/files/groupchat_file/<chat>/<file>
    * с query key_id. Живой пробой не подтверждена (findings.md, P2: вложение наблюдалось,
@@ -54,6 +56,8 @@ export const DEFAULT_LIMITS: LimitsConfig = {
   listChatsDefaultLimit: 50,
   searchDefaultLimit: 50,
   historyDefaultLimit: 50,
+  /* 10 минут: заметно дольше серии вызовов подряд и заметно короче рабочего дня */
+  profileCacheTtlMs: 600_000,
 };
 
 export const DEFAULT_AUTH: AuthConfig = {

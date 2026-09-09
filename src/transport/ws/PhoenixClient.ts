@@ -21,6 +21,11 @@
  *     необратима: сервер мог принять кадр и не успеть ответить, и слепой повтор задвоил бы
  *     сообщение у собеседника. Поэтому `retry:false` не повторяется НИКОГДА, ни после
  *     обрыва, ни по таймауту.
+ *
+ *  4. ЗАКРЫТИЕ ПО ПРОСТОЮ. Открытый сокет это не только ресурс, но и заявление: мессенджер
+ *     показывает владельца сессии в сети, пока соединение живо. Поэтому простой закрывает
+ *     соединение сам, а следующий запрос поднимает его заново через `ensureConnection`.
+ *     Закрытие штатное и наружу не видно ничем, кроме одной повторной авторизации сокета.
  */
 import WebSocket from 'ws';
 import type { ClientRequest, IncomingMessage } from 'node:http';
@@ -92,6 +97,9 @@ interface Connection {
   nextRef: number;
   pending: Map<number, PendingRequest>;
   heartbeatTimer: NodeJS.Timeout | undefined;
+  idleTimer: NodeJS.Timeout | undefined;
+  /** Момент последнего обмена: из него берётся длительность простоя для лога закрытия */
+  lastExchangeAt: number;
   closed: boolean;
 }
 
@@ -219,6 +227,7 @@ export class PhoenixWsClient implements PhoenixClient {
     const ref = connection.nextRef;
     connection.nextRef += 1;
     const timeoutMs = options.timeoutMs ?? this.deps.config.ws.requestTimeoutMs;
+    this.restartIdleTimer(connection);
     return this.sendAndWait(connection, { topic, event, payload, ref }, timeoutMs);
   }
 
@@ -265,6 +274,8 @@ export class PhoenixWsClient implements PhoenixClient {
       nextRef: 0,
       pending: new Map(),
       heartbeatTimer: undefined,
+      idleTimer: undefined,
+      lastExchangeAt: Date.now(),
       closed: false,
     };
 
@@ -295,6 +306,11 @@ export class PhoenixWsClient implements PhoenixClient {
 
     this.startHeartbeat(connection);
     this.connection = connection;
+    /*
+     * Отсчёт простоя заводится только после регистрации соединения: сработай он раньше,
+     * закрывать было бы нечего, а вернувшийся из хендшейка объект оказался бы уже мёртвым.
+     */
+    this.restartIdleTimer(connection);
     this.deps.logger?.info('ws: соединение открыто и аутентифицировано');
     return connection;
   }
@@ -409,7 +425,53 @@ export class PhoenixWsClient implements PhoenixClient {
     }
     connection.pending.delete(ref);
     clearTimeout(pending.timer);
+    /*
+     * Отсчёт простоя перезапускается на ответе, а не только на отправке: обмен закончился
+     * именно здесь. Heartbeat ожидания не заводит и до этой строки не доходит, поэтому
+     * служебный кадр соединение не продлевает и простой остаётся простоем.
+     */
+    this.restartIdleTimer(connection);
     apply(pending);
+  }
+
+  /**
+   * Перезапускает отсчёт простоя. Таймер снимает ref с процесса: он фоновая уборка, и
+   * держать ради неё живым сервер, которому больше нечего делать, было бы неправильно.
+   */
+  private restartIdleTimer(connection: Connection): void {
+    connection.lastExchangeAt = Date.now();
+    if (connection.idleTimer !== undefined) {
+      clearTimeout(connection.idleTimer);
+      connection.idleTimer = undefined;
+    }
+    const idleCloseMs = this.deps.config.ws.idleCloseMs;
+    if (idleCloseMs <= 0 || connection.closed) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      this.onIdleDeadline(connection);
+    }, idleCloseMs);
+    timer.unref();
+    connection.idleTimer = timer;
+  }
+
+  /**
+   * Срок простоя вышел. Запрос в полёте отменяет закрытие и переносит его на следующий
+   * интервал: соединение, закрытое под ожиданием, отняло бы у вызывающего готовый ответ,
+   * а ради экономии присутствия терять ответы нельзя.
+   */
+  private onIdleDeadline(connection: Connection): void {
+    if (connection.closed) {
+      return;
+    }
+    if (connection.pending.size > 0) {
+      this.restartIdleTimer(connection);
+      return;
+    }
+    this.deps.logger?.info('ws: соединение закрыто по простою', {
+      idleMs: Date.now() - connection.lastExchangeAt,
+    });
+    this.dropConnection('idle', connection);
   }
 
   private startHeartbeat(connection: Connection): void {
@@ -437,6 +499,10 @@ export class PhoenixWsClient implements PhoenixClient {
     if (connection.heartbeatTimer !== undefined) {
       clearInterval(connection.heartbeatTimer);
     }
+    if (connection.idleTimer !== undefined) {
+      clearTimeout(connection.idleTimer);
+      connection.idleTimer = undefined;
+    }
     if (this.connection === connection) {
       this.connection = undefined;
     }
@@ -450,8 +516,13 @@ export class PhoenixWsClient implements PhoenixClient {
     this.deps.logger?.warn('ws: соединение закрыто', { reason });
   }
 
-  private dropConnection(reason: string): void {
-    const connection = this.connection;
+  /**
+   * Закрывает соединение штатно. Цель задаётся явно там, где закрывающий держит ссылку:
+   * закрытие по простою обязано попасть ровно в то соединение, чей таймер сработал, а не
+   * в текущее, которым к этому моменту может оказаться уже другое.
+   */
+  private dropConnection(reason: string, target?: Connection): void {
+    const connection = target ?? this.connection;
     if (connection === undefined) {
       return;
     }

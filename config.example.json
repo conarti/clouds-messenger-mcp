@@ -37,6 +37,7 @@
     "reconnectAttempts": 5,
     "reconnectBaseDelayMs": 500,
     "reconnectMaxDelayMs": 10000,
-    "heartbeatIntervalMs": 30000
+    "heartbeatIntervalMs": 30000,
+    "idleCloseMs": 300000
   }
 }

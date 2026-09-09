@@ -8,6 +8,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { AuthError } from '../../src/auth/AuthProvider.js';
+import type { WsConfig } from '../../src/config/types.js';
 import { PhoenixReplyError, PhoenixWsClient, WsClosedError } from '../../src/transport/ws/PhoenixClient.js';
 import type { PhoenixFrame } from '../../src/transport/ws/frames.js';
 import { FakeAuth } from '../helpers/fakeAuth.js';
@@ -18,7 +19,7 @@ let mock: MockPhoenix;
 let auth: FakeAuth;
 let client: PhoenixWsClient;
 
-function createClient(): PhoenixWsClient {
+function createClient(ws: Partial<WsConfig> = {}): PhoenixWsClient {
   return new PhoenixWsClient({
     auth,
     config: createTestConfig({
@@ -32,6 +33,9 @@ function createClient(): PhoenixWsClient {
         reconnectMaxDelayMs: 40,
         /* Heartbeat в тестах не нужен: он только расходовал бы ref и путал проверки */
         heartbeatIntervalMs: 60_000,
+        /* Закрытие по простою выключено везде, кроме набора, который его и проверяет */
+        idleCloseMs: 0,
+        ...ws,
       },
     }),
   });
@@ -252,6 +256,72 @@ describe('обрыв и повтор', () => {
     ).rejects.toThrow(/не пришёл/);
 
     expect(mock.framesOf('message_new')).toHaveLength(1);
+  });
+});
+
+/**
+ * Простой. Открытый сокет это заявление о присутствии: пока он жив, мессенджер показывает
+ * владельца сессии в сети. Интервалы здесь десятки миллисекунд, но время настоящее:
+ * подменённый таймер доказал бы вызов планировщика, а доказать надо закрытие сокета,
+ * которое видит вторая сторона, и подъём нового соединения со своим authenticate.
+ */
+describe('простой', () => {
+  const IDLE_CLOSE_MS = 150;
+
+  it('закрывает соединение сам, когда запросов больше нет', async () => {
+    client = createClient({ idleCloseMs: IDLE_CLOSE_MS });
+    mock.respondTo('read', () => ({ status: 'ok', response: { value: 'ответ' } }));
+
+    await client.request('system', 'read', {});
+    const connection = mock.latest;
+
+    expect(await waitFor(() => connection.closed)).toBe(true);
+    /* Закрытие штатное, а не обрыв с переподключением: взамен никто ничего не поднимал */
+    expect(mock.connections).toHaveLength(1);
+  });
+
+  it('следующий запрос поднимает новое соединение и снова авторизует его', async () => {
+    client = createClient({ idleCloseMs: IDLE_CLOSE_MS });
+    mock.respondTo('read', () => ({ status: 'ok', response: { value: 'ответ' } }));
+
+    await client.request('system', 'read', {});
+    expect(await waitFor(() => mock.latest.closed)).toBe(true);
+
+    await expect(client.request('system', 'read', {})).resolves.toEqual({ value: 'ответ' });
+
+    expect(mock.connections).toHaveLength(2);
+    /* Соединение поднято с нуля: первым кадром снова authenticate, и ref начат заново */
+    const second = mock.connections[1];
+    expect(second?.frames[0]?.event).toBe('authenticate');
+    expect(second?.frames[0]?.ref).toBe(0);
+    expect(second?.closed).toBe(false);
+  });
+
+  it('запрос в полёте переносит закрытие: ответ дольше простоя не теряется', async () => {
+    client = createClient({ idleCloseMs: IDLE_CLOSE_MS });
+    mock.respondTo('read', (frame, connection) => {
+      setTimeout(() => {
+        mock.reply(connection, frame, { status: 'ok', response: { value: 'ответ' } });
+      }, IDLE_CLOSE_MS + 100);
+      return undefined;
+    });
+
+    await expect(client.request('system', 'read', {})).resolves.toEqual({ value: 'ответ' });
+
+    expect(mock.connections).toHaveLength(1);
+    expect(mock.latest.closed).toBe(false);
+  });
+
+  it('ноль выключает авто-закрытие: соединение переживает несколько интервалов', async () => {
+    const idleBaseMs = 50;
+    client = createClient({ idleCloseMs: 0 });
+
+    await client.connect();
+    const connection = mock.latest;
+    await new Promise((resolve) => setTimeout(resolve, idleBaseMs * 4));
+
+    expect(connection.closed).toBe(false);
+    expect(mock.connections).toHaveLength(1);
   });
 });
 

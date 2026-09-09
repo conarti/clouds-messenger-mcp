@@ -31,6 +31,11 @@ export interface MockConnection {
   headers: IncomingHttpHeaders;
   /** Все разобранные входящие кадры этого соединения */
   frames: PhoenixFrame[];
+  /**
+   * Закрытие, увиденное серверной стороной. Без него «клиент закрыл сокет сам» доказывать
+   * нечем: отсутствие новых кадров одинаково выглядит и при закрытии, и при молчании.
+   */
+  closed: boolean;
 }
 
 /** Разделитель составного ключа ответчика: в именах топиков и событий не встречается */
@@ -71,10 +76,14 @@ export class MockPhoenix {
         url: request.url ?? '',
         headers: request.headers,
         frames: [],
+        closed: false,
       };
       this.connections.push(connection);
       socket.on('message', (data: Buffer) => {
         this.onFrame(connection, data.toString('utf8'));
+      });
+      socket.on('close', () => {
+        connection.closed = true;
       });
       /* Обрыв соединения это штатный сценарий теста, а не сбой мока */
       socket.on('error', () => undefined);

@@ -102,6 +102,18 @@ describe('приоритет источников', () => {
     expect(config.protocol).toEqual(DEFAULT_PROTOCOL);
   });
 
+  /*
+   * Закрытие сокета по простою включено по умолчанию: оно про присутствие человека в сети,
+   * а значение, которое надо включать руками, до пользователя не доедет.
+   */
+  it('простой закрывает сокет через пять минут, и ноль это выключает', () => {
+    expect(DEFAULT_WS.idleCloseMs).toBe(300_000);
+
+    writeFileSync(configFile, JSON.stringify({ ws: { idleCloseMs: 0 } }));
+
+    expect(loadConfig().ws.idleCloseMs).toBe(0);
+  });
+
   it('profileDir переопределяется файлом', () => {
     const fromFile = join(workDir, 'profile-from-file');
     writeFileSync(configFile, JSON.stringify({ paths: { profileDir: fromFile } }));

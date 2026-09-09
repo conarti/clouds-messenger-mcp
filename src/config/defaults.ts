@@ -69,6 +69,8 @@ export const DEFAULT_WS: WsConfig = {
   reconnectBaseDelayMs: 500,
   reconnectMaxDelayMs: 10_000,
   heartbeatIntervalMs: 30_000,
+  /* 5 минут: заметно дольше любой серии запросов подряд и заметно короче рабочего перерыва */
+  idleCloseMs: 300_000,
 };
 
 /**

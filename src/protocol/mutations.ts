@@ -70,6 +70,28 @@ export interface TextInnerEventInput {
   timestamp: string;
   /** Связь ответа: есть только у ответа на сообщение, иначе ключа в событии нет вовсе */
   reply?: ReplyLink;
+  /** Упоминания: есть только у сообщения с упоминаниями, иначе ключа в событии нет вовсе */
+  mentions?: OutgoingMention[];
+}
+
+/** Упоминание для отправки: адрес человека, его имя и идентификатор плейсхолдера в теле */
+export interface OutgoingMention {
+  /** Стоит в теле как `@{mention:<mentionId>}` */
+  mentionId: string;
+  huid: string;
+  name: string;
+}
+
+/**
+ * `mentions[]` в форме, снятой живой пробой M1 (25 из 25 упоминаний): `mention_type` всегда
+ * `user`, `conn_type` всегда `cts`, порядок ключей тот же, что в пробе.
+ */
+export function buildMentions(mentions: readonly OutgoingMention[]): Record<string, unknown>[] {
+  return mentions.map((mention) => ({
+    mention_type: 'user',
+    mention_id: mention.mentionId,
+    mention_data: { conn_type: 'cts', user_huid: mention.huid, name: mention.name },
+  }));
 }
 
 /**
@@ -164,7 +186,8 @@ export function buildReplyLink(input: ReplyLinkInput): ReplyLink | undefined {
  * Поля координат и флаги пересылки присутствуют ВСЕГДА и нулевыми: живой клиент шлёт
  * именно так, а состав полей внутреннего события входит в подписанный шифротекст, поэтому
  * «лишнее не отправлять» здесь означает отправить не то, что принято сервером в пробе.
- * По той же причине `reply` появляется ТОЛЬКО у ответа: обычное сообщение уходит в прежней форме.
+ * По той же причине `reply` появляется ТОЛЬКО у ответа, а `mentions` ТОЛЬКО у сообщения с
+ * упоминаниями: обычное сообщение уходит в прежней форме.
  */
 export function buildTextInnerEvent(input: TextInnerEventInput): Record<string, unknown> {
   return {
@@ -179,6 +202,9 @@ export function buildTextInnerEvent(input: TextInnerEventInput): Record<string, 
     stealth_forwarding: false,
     body: input.text,
     ...(input.reply !== undefined ? { reply: input.reply } : {}),
+    ...(input.mentions !== undefined && input.mentions.length > 0
+      ? { mentions: buildMentions(input.mentions) }
+      : {}),
   };
 }
 
@@ -190,6 +216,8 @@ export interface BuildMessageNewInput {
   syncId: string;
   /** Связь ответа; без неё внутреннее событие собирается в прежней форме */
   reply?: ReplyLink;
+  /** Упоминания; их плейсхолдеры уже стоят в `text` */
+  mentions?: OutgoingMention[];
   deps: MutationDeps;
 }
 
@@ -237,6 +265,7 @@ export async function buildMessageNewRequest(
       msgId: createRequestId(),
       timestamp: toIso(new Date()),
       ...(input.reply !== undefined ? { reply: input.reply } : {}),
+      ...(input.mentions !== undefined ? { mentions: input.mentions } : {}),
     }),
     groupChatId: chat.chat_id,
     syncId: input.syncId,

@@ -495,7 +495,8 @@ export function createServer(options: CreateServerOptions): McpServer {
         'вызовом получите явное согласие пользователя на адресата и текст. Повтор вызова ' +
         'создаёт ВТОРОЕ сообщение: если ответ потерян, сначала проверьте get_history. Неоднозначный или незнакомый чат ничего не отправляет и ' +
         'отвечает статусом ambiguous_chat с кандидатами или chat_not_found. Успех отвечает ' +
-        'status:"sent" с chat_id, chat_name, message_id и inserted_at, у ответа ещё и reply_to.',
+        'status:"sent" с chat_id, chat_name, message_id и inserted_at, у ответа ещё и reply_to, ' +
+        'при упоминаниях ещё и mentions [{huid, name}].',
       inputSchema: {
         chat: z
           .string()
@@ -514,6 +515,18 @@ export function createServer(options: CreateServerOptions): McpServer {
             'Ответить на сообщение: его message_id (UUID) из выдачи get_history этого же чата. ' +
               'Цитата собирается из самого сообщения. Ненайденное сообщение ничего не отправляет ' +
               'и отвечает статусом reply_target_not_found',
+          ),
+        mentions: z
+          .array(z.string().min(1))
+          .optional()
+          .describe(
+            'Кого упомянуть: huid участника этого чата либо его однозначное имя (полное имя или ' +
+              'набор целых слов имени, без учёта регистра). В text для каждого ищется по порядку: ' +
+              'маркер @{mention:<эта строка>}, @Полное Имя из справки, @<эта строка>; совпадение ' +
+              'только целым словом, одно вхождение на один элемент mentions (чтобы упомянуть ' +
+              'человека дважды, передайте его дважды). Ненайденный человек (mention_not_found), ' +
+              'неоднозначное имя (ambiguous_mention, с кандидатами) или отсутствие места в ' +
+              'тексте (mention_not_in_text) отменяют отправку целиком',
           ),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },

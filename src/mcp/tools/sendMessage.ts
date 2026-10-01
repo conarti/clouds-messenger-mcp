@@ -16,14 +16,16 @@
  */
 import { resolveChat } from '../../chat/resolveChat.js';
 import { resolveFailure, type ChatResolveFailure } from '../../chat/resolveFailure.js';
+import { resolvePerson } from '../../chat/resolvePerson.js';
 import type { ChatRecord } from '../../protocol/chatShape.js';
 import { decryptHistoryEvents } from '../../protocol/decryptHistory.js';
 import { fetchEventBySyncId } from '../../protocol/eventInfo.js';
-import { UUID_PATTERN } from '../../protocol/messageShape.js';
+import { UUID_PATTERN, type Mention } from '../../protocol/messageShape.js';
 import {
   buildMessageNewRequest,
   buildReplyLink,
   sendMessageNew,
+  type OutgoingMention,
   type ReplyLink,
 } from '../../protocol/mutations.js';
 import { fetchProfilesByHuids } from '../../protocol/profiles.js';
@@ -36,6 +38,8 @@ export interface SendMessageInput {
   text: string;
   /** Адрес сообщения (UUID) в том же чате, на которое отправляется ответ */
   reply_to?: string | undefined;
+  /** Кого упомянуть: huid участника чата либо его однозначное имя */
+  mentions?: string[] | undefined;
 }
 
 /** Потолок длины текста; тем же числом ограничена схема параметра */
@@ -52,6 +56,8 @@ export interface SendMessageSent {
   inserted_at?: string;
   /** Есть только у ответа: адрес сообщения, на которое ответили */
   reply_to?: { message_id: string };
+  /** Есть только при упоминаниях: кого упомянули, в порядке входа */
+  mentions?: Mention[];
 }
 
 /** Цитируемое сообщение не найдено либо не годится для цитаты: кадр при этом не уходит */
@@ -61,7 +67,38 @@ export interface ReplyTargetNotFound {
   next_step: string;
 }
 
-export type SendMessageResult = SendMessageSent | ReplyTargetNotFound | ChatResolveFailure;
+/** Человек для упоминания не найден среди участников чата: кадр не уходит */
+export interface MentionNotFound {
+  status: 'mention_not_found';
+  mention: string;
+  reason: string;
+  next_step: string;
+}
+
+/** Строка упоминания совпала с несколькими участниками: выбор за вызывающим */
+export interface AmbiguousMention {
+  status: 'ambiguous_mention';
+  mention: string;
+  candidates: Mention[];
+  next_step: string;
+}
+
+/** Ни маркера, ни имени упомянутого в тексте нет: ставить плейсхолдер некуда */
+export interface MentionNotInText {
+  status: 'mention_not_in_text';
+  mention: string;
+  /** Что искалось в тексте, в порядке поиска */
+  searched: string[];
+  next_step: string;
+}
+
+export type MentionFailure = MentionNotFound | AmbiguousMention | MentionNotInText;
+
+export type SendMessageResult =
+  | SendMessageSent
+  | ReplyTargetNotFound
+  | MentionFailure
+  | ChatResolveFailure;
 
 const REPLY_TARGET_NEXT_STEP =
   'сверьте reply_to: возьмите message_id текстового сообщения из выдачи get_history этого же ' +
@@ -124,6 +161,102 @@ async function resolveReplyLink(
   );
 }
 
+const MENTION_NOT_FOUND_NEXT_STEP =
+  'передайте в mentions huid участника этого чата либо его имя так, как его называет ' +
+  'справка; упомянуть можно только участника чата';
+
+const AMBIGUOUS_MENTION_NEXT_STEP =
+  'имя совпало с несколькими участниками, выбор за вами: повторите вызов, передав в mentions ' +
+  'huid одного из candidates';
+
+const MENTION_NOT_IN_TEXT_NEXT_STEP =
+  'поставьте в text место упоминания: маркер @{mention:<строка из mentions>} либо @Имя ' +
+  'в том виде, в каком его назвала справка';
+
+/** Упоминания с плейсхолдерами в тексте либо отказ; ни один кадр до этого не собирается */
+interface PreparedMentions {
+  text: string;
+  mentions: OutgoingMention[];
+}
+
+/** Буква или цифра сразу за образцом означает, что образец это начало другого слова */
+const WORD_CONTINUATION = /[\p{L}\p{N}]/u;
+
+/**
+ * Первое вхождение образца, за которым не продолжается слово: `@Иван Петров` не находится
+ * внутри `@Иван Петрова`. Поиск строковый, поэтому символы образца ничего не значат.
+ */
+function findWholeOccurrence(body: string, pattern: string): number {
+  let index = body.indexOf(pattern);
+  while (index !== -1) {
+    const next = body.charAt(index + pattern.length);
+    if (!WORD_CONTINUATION.test(next)) {
+      return index;
+    }
+    index = body.indexOf(pattern, index + 1);
+  }
+  return -1;
+}
+
+/**
+ * Резолвит всех упомянутых и ставит плейсхолдеры. Для каждого входа в тексте ищется по
+ * порядку: маркер `@{mention:<вход>}`, `@<полное имя из справки>`, `@<вход как передан>`.
+ * Совпадение засчитывается только на границе слова. Каждый вход заменяет ОДНО вхождение
+ * на `@{mention:<mention_id>}`: повтор того же человека в тексте остаётся текстом, а для
+ * второго упоминания человека передают в mentions ещё раз (живьём повтор одного адресата в
+ * одном сообщении не встречался). Первый же промах отменяет отправку целиком.
+ */
+async function prepareMentions(
+  deps: ToolDeps,
+  chat: ChatRecord,
+  text: string,
+  queries: readonly string[],
+): Promise<PreparedMentions | MentionFailure> {
+  const resolvedPeople: Array<{ query: string; person: Mention }> = [];
+  for (const query of queries) {
+    const resolvedPerson = await resolvePerson(deps, chat, query);
+    if (resolvedPerson.kind === 'not_found') {
+      return {
+        status: 'mention_not_found',
+        mention: query,
+        reason: resolvedPerson.reason,
+        next_step: MENTION_NOT_FOUND_NEXT_STEP,
+      };
+    }
+    if (resolvedPerson.kind === 'ambiguous') {
+      return {
+        status: 'ambiguous_mention',
+        mention: query,
+        candidates: resolvedPerson.candidates,
+        next_step: AMBIGUOUS_MENTION_NEXT_STEP,
+      };
+    }
+    resolvedPeople.push({ query, person: resolvedPerson.person });
+  }
+
+  let body = text;
+  const mentions: OutgoingMention[] = [];
+  for (const { query, person } of resolvedPeople) {
+    const searched = [
+      ...new Set([`@{mention:${query}}`, `@${person.name}`, `@${query.trim()}`]),
+    ];
+    const pattern = searched.find((candidate) => findWholeOccurrence(body, candidate) !== -1);
+    if (pattern === undefined) {
+      return {
+        status: 'mention_not_in_text',
+        mention: query,
+        searched,
+        next_step: MENTION_NOT_IN_TEXT_NEXT_STEP,
+      };
+    }
+    const mentionId = createRequestId();
+    const index = findWholeOccurrence(body, pattern);
+    body = `${body.slice(0, index)}@{mention:${mentionId}}${body.slice(index + pattern.length)}`;
+    mentions.push({ mentionId, huid: person.huid, name: person.name });
+  }
+  return { text: body, mentions };
+}
+
 export async function sendMessage(
   deps: ToolDeps,
   input: SendMessageInput,
@@ -133,6 +266,17 @@ export async function sendMessage(
     return resolveFailure(resolved);
   }
   const chat = resolved.chat;
+
+  let text = input.text;
+  let mentions: OutgoingMention[] = [];
+  if (input.mentions !== undefined && input.mentions.length > 0) {
+    const prepared = await prepareMentions(deps, chat, input.text, input.mentions);
+    if ('status' in prepared) {
+      return prepared;
+    }
+    text = prepared.text;
+    mentions = prepared.mentions;
+  }
 
   let reply: ReplyLink | undefined;
   if (input.reply_to !== undefined) {
@@ -147,14 +291,16 @@ export async function sendMessage(
   deps.logger.info('send_message: отправка', {
     chatId: chat.chat_id,
     syncId,
-    textLength: input.text.length,
+    textLength: text.length,
     isReply: reply !== undefined,
+    mentionCount: mentions.length,
   });
   const request = await buildMessageNewRequest({
     chat,
-    text: input.text,
+    text,
     syncId,
     ...(reply !== undefined ? { reply } : {}),
+    ...(mentions.length > 0 ? { mentions } : {}),
     deps,
   });
   const ack = await sendMessageNew(deps, request);
@@ -166,5 +312,8 @@ export async function sendMessage(
     message_id: syncId,
     ...(ack.inserted_at !== undefined ? { inserted_at: ack.inserted_at } : {}),
     ...(reply !== undefined ? { reply_to: { message_id: reply.sync_id } } : {}),
+    ...(mentions.length > 0
+      ? { mentions: mentions.map((mention) => ({ huid: mention.huid, name: mention.name })) }
+      : {}),
   };
 }

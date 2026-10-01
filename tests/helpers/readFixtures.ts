@@ -60,7 +60,11 @@ export function makeRawChat(input: RawChatInput): Record<string, unknown> {
   };
 }
 
-/** Упоминание внутри события: форма снята живой пробой */
+/**
+ * Упоминание внутри события: форма и значения сняты живой пробой M1 (`mention_type` это
+ * `user`, `conn_type` это `cts`). Другой `mention_type` задаётся явно только для ветки разбора
+ * без адресата, живьём не встреченной.
+ */
 export interface MentionFixture {
   mentionId: string;
   name: string;
@@ -69,9 +73,9 @@ export interface MentionFixture {
   mentionType?: string;
 }
 
-function makeMentions(mentions: readonly MentionFixture[]): Record<string, unknown>[] {
+export function makeMentions(mentions: readonly MentionFixture[]): Record<string, unknown>[] {
   return mentions.map((mention) => ({
-    mention_type: mention.mentionType ?? 'contact',
+    mention_type: mention.mentionType ?? 'user',
     mention_id: mention.mentionId,
     mention_data: {
       conn_type: 'cts',

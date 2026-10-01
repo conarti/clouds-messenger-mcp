@@ -145,7 +145,7 @@ function resolvePlaywrightCore(): { cliPath: string; version: string } {
 }
 
 /** Команды ручной установки для точной версии: `npx playwright` без версии взял бы чужую ревизию */
-export function manualInstallHint(version: string, platform: NodeJS.Platform): string {
+function manualInstallHint(version: string, platform: NodeJS.Platform): string {
   const install = `npx playwright@${version} install chromium`;
   if (platform !== 'linux') {
     return `Установите браузер вручную: ${install}`;
@@ -186,7 +186,7 @@ export type InstallWaitResult = 'ready' | 'failed' | 'pending';
 const DEFAULT_KILL_GRACE_MS = 3_000;
 
 /** Пауза перед повтором после отказа: каждый вызов инструмента иначе запускал бы загрузку заново */
-export const DEFAULT_RETRY_COOLDOWN_MS = 30_000;
+const DEFAULT_RETRY_COOLDOWN_MS = 30_000;
 
 /**
  * Установка Chromium с осевшим результатом.
@@ -439,11 +439,14 @@ function currentInstallHint(): string {
  * получает причину и команду ручной установки, а не сырую ошибку Playwright.
  */
 export function browserUnavailable(cause: unknown): AuthError {
-  const reason = isMissingExecutableError(cause)
-    ? `сборка Chromium не найдена. ${currentInstallHint()}`
-    : cause instanceof Error
-      ? cause.message
-      : String(cause);
+  let reason: string;
+  if (isMissingExecutableError(cause)) {
+    reason = `сборка Chromium не найдена. ${currentInstallHint()}`;
+  } else if (cause instanceof Error) {
+    reason = cause.message;
+  } else {
+    reason = String(cause);
+  }
   return new AuthError(`Браузер для входа недоступен: ${reason}`, 'protocol', { cause });
 }
 

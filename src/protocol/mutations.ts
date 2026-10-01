@@ -86,7 +86,7 @@ export interface OutgoingMention {
  * `mentions[]` в форме, снятой живой пробой M1 (25 из 25 упоминаний): `mention_type` всегда
  * `user`, `conn_type` всегда `cts`, порядок ключей тот же, что в пробе.
  */
-export function buildMentions(mentions: readonly OutgoingMention[]): Record<string, unknown>[] {
+function buildMentions(mentions: readonly OutgoingMention[]): Record<string, unknown>[] {
   return mentions.map((mention) => ({
     mention_type: 'user',
     mention_id: mention.mentionId,

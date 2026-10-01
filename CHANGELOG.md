@@ -1,3 +1,10 @@
+# [0.4.0](https://github.com/conarti/clouds-messenger-mcp/compare/v0.3.0...v0.4.0) (2026-10-01)
+
+
+### Features
+
+* чужие треды в get_thread и признак треда в сообщениях ([3b46cda](https://github.com/conarti/clouds-messenger-mcp/commit/3b46cda53337765be1ae686edcd4fd37f8b90b93)), closes [#5](https://github.com/conarti/clouds-messenger-mcp/issues/5)
+
 # [0.3.0](https://github.com/conarti/clouds-messenger-mcp/compare/v0.2.1...v0.3.0) (2026-09-09)
 
 

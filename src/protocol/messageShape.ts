@@ -37,6 +37,22 @@ export interface Mention {
   name: string;
 }
 
+/**
+ * Тред, начатый от сообщения. Адрес треда равен адресу самого сообщения (`sync_id`), а
+ * число ответов досчитывается отдельным шагом (см. `attachReplyCounts`) и может отсутствовать,
+ * если сервер его не отдал.
+ */
+export interface MessageThread {
+  thread_id: string;
+  replies_count?: number;
+}
+
+/**
+ * Признак стартового сообщения треда во ВНЕШНЕМ (нешифрованном) `meta`. Живьём ключ либо
+ * `true`, либо отсутствует; счётчика ответов рядом нет.
+ */
+const THREAD_STARTED_FIELD = 'thread_started';
+
 /** `type` внутреннего события со ссылкой: текст в `body`, адрес в `payload.url` */
 const LINK_EVENT_TYPE = 'link';
 
@@ -68,6 +84,8 @@ export interface Message {
   attachments?: Attachment[];
   reactions?: Reaction[];
   read_by_count?: number;
+  /** Есть, только если от сообщения начат тред */
+  thread?: MessageThread;
   /** Текст отказа расшифровки с тегом слоя; сообщение при этом остаётся в выдаче */
   decrypt_error?: string;
 }
@@ -181,6 +199,7 @@ export function normalizeEvent(rawEvent: unknown, decrypted?: DecryptedPart): Me
   const reactions = extractReactions(event);
   const readBy = event['read_by'];
   const readByCount = Array.isArray(readBy) ? readBy.length : undefined;
+  const threadStarted = asObject(event['meta'])?.[THREAD_STARTED_FIELD] === true;
 
   return {
     message_id: messageId,
@@ -195,6 +214,7 @@ export function normalizeEvent(rawEvent: unknown, decrypted?: DecryptedPart): Me
     ...(attachments.length > 0 ? { attachments } : {}),
     ...(reactions.length > 0 ? { reactions } : {}),
     ...(readByCount !== undefined ? { read_by_count: readByCount } : {}),
+    ...(threadStarted ? { thread: { thread_id: messageId } } : {}),
     ...(decrypted?.error !== undefined ? { decrypt_error: decrypted.error } : {}),
   };
 }

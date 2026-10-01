@@ -37,6 +37,7 @@ import {
 } from '../../protocol/decryptHistory.js';
 import { enrichMessages, type EnrichedMessage } from '../../protocol/enrichMessage.js';
 import { fetchHistoryPage } from '../../protocol/history.js';
+import { attachReplyCounts } from '../../protocol/threads.js';
 import { parseIso } from '../../util/timestamps.js';
 import type { ToolDeps } from './deps.js';
 
@@ -205,7 +206,8 @@ export async function getHistory(deps: ToolDeps, input: GetHistoryInput): Promis
     }
   }
 
-  const messages = collected.slice(0, limit).reverse();
+  /* Счётчики ответов досчитываются один раз на отданный срез, а не на каждую добранную страницу */
+  const messages = await attachReplyCounts(deps, collected.slice(0, limit).reverse());
   const oldestReturned = messages[0];
   const decryptErrors = mergeSummaries(decryptParts);
 

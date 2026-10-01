@@ -5,10 +5,8 @@
  * повторяет её целиком, включая поля, которые наружу не уходят: разбор обязан их пережить,
  * а не спотыкаться о лишнее.
  *
- * Подложный сервер здесь СОЗНАТЕЛЬНО не понимает сужения по чату: живая проба спрашивала
- * список только целиком, и код обязан выдерживать сервер, который на суженный запрос
- * отвечает пустотой. Если бы подложный сервер сразу отвечал удобно, проверка доказывала бы
- * только саму себя.
+ * Список тредов содержит только подписки пользователя, поэтому промах по нему обязан
+ * переспрашиваться справкой `thread_info`, а не превращаться в «треда нет».
  */
 import { describe, expect, it } from 'vitest';
 import type { AuthProvider } from '../../src/auth/AuthProvider.js';
@@ -16,8 +14,11 @@ import type { KeyStore } from '../../src/auth/keyStore.js';
 import type { CryptoService } from '../../src/crypto/types.js';
 import { getThread } from '../../src/mcp/tools/getThread.js';
 import type { ToolDeps } from '../../src/mcp/tools/deps.js';
+import { PhoenixReplyError } from '../../src/transport/ws/PhoenixClient.js';
 import {
+  THREAD_INFO_EVENT,
   THREAD_LIST_EVENT,
+  fetchThreadInfo,
   fetchThreadList,
   findThread,
   normalizeThread,
@@ -118,12 +119,34 @@ function createDeps(responder: Responder): { deps: ToolDeps; calls: RecordedCall
   };
 }
 
-/** Сервер, который сужение по чату НЕ понимает: на запрос с чатом отдаёт пустоту */
-function narrowingBlindServer(threads: Record<string, unknown>[]): Responder {
+/**
+ * Сервер с подписками в списке и справкой о любом треде из `known`. Неизвестный адрес
+ * справки это отказ `thread_not_found`, как на живой пробе.
+ */
+function threadServer(
+  listed: Record<string, unknown>[],
+  known: Record<string, unknown>[] = listed,
+): Responder {
   return (call) => {
-    const requested = call.payload['group_chat_id'];
-    return { [THREAD_LIST_EVENT]: requested === null ? threads : [] };
+    if (call.event === THREAD_LIST_EVENT) {
+      return { [THREAD_LIST_EVENT]: listed };
+    }
+    if (call.event === THREAD_INFO_EVENT) {
+      const info = known.find((thread) => thread['thread_id'] === call.payload['thread_id']);
+      if (info === undefined) {
+        throw new PhoenixReplyError('thread_not_found', call.topic, call.event, {
+          error: 'thread_not_found',
+        });
+      }
+      return { [THREAD_INFO_EVENT]: info };
+    }
+    throw new Error(`неожиданное событие ${call.event}`);
   };
+}
+
+/** Чужой тред: справка о нём есть, в списке подписок его нет */
+function foreignThread(threadId: string, chatId: string): Record<string, unknown> {
+  return { ...rawThread(threadId, chatId), active: false };
 }
 
 describe('normalizeThread', () => {
@@ -131,7 +154,7 @@ describe('normalizeThread', () => {
     expect(normalizeThread(rawThread(THREAD_ID, POLYGON_CHAT_ID))).toEqual({
       thread_id: THREAD_ID,
       chat_id: POLYGON_CHAT_ID,
-      unread_count: 3,
+      replies_count: 3,
       last_message_id: '00000000-0000-4000-8000-000000000009',
       last_activity: '2026-09-08T07:04:00.000Z',
     });
@@ -165,14 +188,6 @@ describe('fetchThreadList', () => {
     });
   });
 
-  it('сужение по чату подставляет идентификатор вместо пустого значения', async () => {
-    const { deps, calls } = createDeps(() => ({ [THREAD_LIST_EVENT]: [] }));
-
-    await fetchThreadList(deps, POLYGON_CHAT_ID);
-
-    expect(calls[0]?.payload['group_chat_id']).toBe(POLYGON_CHAT_ID);
-  });
-
   it('читает конверт под обоими известными именами и роняет только неадресуемые записи', async () => {
     const { deps } = createDeps(() => ({
       threads: [rawThread(THREAD_ID, POLYGON_CHAT_ID), { counter: 1 }],
@@ -184,36 +199,85 @@ describe('fetchThreadList', () => {
   });
 });
 
+describe('fetchThreadInfo', () => {
+  it('спрашивает справку по адресу треда и отдаёт запись с признаком участия', async () => {
+    const { deps, calls } = createDeps(
+      threadServer([], [foreignThread(THREAD_ID, POLYGON_CHAT_ID)]),
+    );
+
+    const info = await fetchThreadInfo(deps, THREAD_ID);
+
+    expect(calls[0]?.topic).toBe('system');
+    expect(calls[0]?.event).toBe(THREAD_INFO_EVENT);
+    expect(calls[0]?.payload).toEqual({ thread_id: THREAD_ID });
+    expect(info).toMatchObject({
+      thread_id: THREAD_ID,
+      chat_id: POLYGON_CHAT_ID,
+      replies_count: 3,
+      active: false,
+    });
+  });
+
+  it('неизвестный адрес это undefined, а не исключение', async () => {
+    const { deps } = createDeps(threadServer([]));
+
+    expect(await fetchThreadInfo(deps, THREAD_ID)).toBeUndefined();
+  });
+
+  it('прочие отказы сервера пробрасываются', async () => {
+    const { deps } = createDeps((call) => {
+      throw new PhoenixReplyError('unauthorized', call.topic, call.event, { error: 'unauthorized' });
+    });
+
+    await expect(fetchThreadInfo(deps, THREAD_ID)).rejects.toBeInstanceOf(PhoenixReplyError);
+  });
+});
+
 describe('findThread', () => {
-  it('находит тред суженным запросом, когда сервер сужение понимает', async () => {
-    const { deps, calls } = createDeps(() => ({
-      [THREAD_LIST_EVENT]: [rawThread(THREAD_ID, POLYGON_CHAT_ID)],
-    }));
+  it('тред из списка подписок находится без справки, пользователь участник', async () => {
+    const { deps, calls } = createDeps(threadServer([rawThread(THREAD_ID, POLYGON_CHAT_ID)]));
 
     const found = await findThread(deps, { chatId: POLYGON_CHAT_ID, threadId: THREAD_ID });
 
-    expect(found?.thread_id).toBe(THREAD_ID);
+    expect(found?.thread.thread_id).toBe(THREAD_ID);
+    expect(found?.source).toBe('thread_list');
+    expect(found?.participant).toBe(true);
     expect(calls).toHaveLength(1);
+    expect(calls[0]?.payload['group_chat_id']).toBeNull();
   });
 
-  it('пустой ответ на суженный запрос переспрашивается полным списком', async () => {
+  it('тред вне списка находится справкой thread_info', async () => {
     const { deps, calls } = createDeps(
-      narrowingBlindServer([rawThread(THREAD_ID, POLYGON_CHAT_ID)]),
+      threadServer([], [foreignThread(THREAD_ID, POLYGON_CHAT_ID)]),
     );
 
     const found = await findThread(deps, { chatId: POLYGON_CHAT_ID, threadId: THREAD_ID });
 
-    expect(found?.chat_id).toBe(POLYGON_CHAT_ID);
-    expect(calls).toHaveLength(2);
-    expect(calls[1]?.payload['group_chat_id']).toBeNull();
+    expect(found?.thread.chat_id).toBe(POLYGON_CHAT_ID);
+    expect(found?.source).toBe('direct');
+    expect(found?.participant).toBe(false);
+    expect(found?.thread).not.toHaveProperty('active');
+    expect(calls.map((call) => call.event)).toEqual([THREAD_LIST_EVENT, THREAD_INFO_EVENT]);
   });
 
-  it('тред чужого чата своим не считается, даже если сервер отдал его в общем списке', async () => {
-    const { deps } = createDeps(narrowingBlindServer([rawThread(OTHER_THREAD_ID, OTHER_CHAT_ID)]));
+  it('тред чужого чата своим не считается ни из списка, ни из справки', async () => {
+    const { deps } = createDeps(
+      threadServer(
+        [rawThread(OTHER_THREAD_ID, OTHER_CHAT_ID)],
+        [rawThread(OTHER_THREAD_ID, OTHER_CHAT_ID), foreignThread(THREAD_ID, OTHER_CHAT_ID)],
+      ),
+    );
 
-    const found = await findThread(deps, { chatId: POLYGON_CHAT_ID, threadId: OTHER_THREAD_ID });
+    expect(
+      await findThread(deps, { chatId: POLYGON_CHAT_ID, threadId: OTHER_THREAD_ID }),
+    ).toBeUndefined();
+    expect(await findThread(deps, { chatId: POLYGON_CHAT_ID, threadId: THREAD_ID })).toBeUndefined();
+  });
 
-    expect(found).toBeUndefined();
+  it('неизвестный тред это undefined', async () => {
+    const { deps } = createDeps(threadServer([]));
+
+    expect(await findThread(deps, { chatId: POLYGON_CHAT_ID, threadId: THREAD_ID })).toBeUndefined();
   });
 });
 

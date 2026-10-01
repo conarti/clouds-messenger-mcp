@@ -5,15 +5,15 @@
  * собственного адреса треда, поэтому доказывается не только форма ответа, но и то, что
  * история треда читается тем же путём, что и история чата, без отдельной механики.
  *
- * ГЛАВНОЕ УТВЕРЖДЕНИЕ ПРОВЕРКИ: чтение по готовому thread_id метки неподтверждённости НЕ
- * несёт (и форма списка тредов, и форма истории наблюдены живьём), а чтение по message_id
- * несёт, потому что равенство адреса треда и адреса стартового сообщения снято с бандла.
+ * ГЛАВНОЕ УТВЕРЖДЕНИЕ ПРОВЕРКИ: тред вне списка подписок читается через справку
+ * `thread_info` с `source:'direct'`, тред другого чата и неизвестный адрес дают
+ * `thread_not_found`, а `thread_join` не отправляется ни в одном сценарии.
  */
 import sodium from 'libsodium-wrappers-sumo';
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { GetThreadResult } from '../../src/mcp/tools/getThread.js';
 import { EVENTS_HISTORY_EVENT } from '../../src/protocol/history.js';
-import { THREAD_LIST_EVENT } from '../../src/protocol/threads.js';
+import { THREAD_INFO_EVENT, THREAD_LIST_EVENT } from '../../src/protocol/threads.js';
 import { makeKeyRing, type KeyRing } from '../helpers/cryptoFixtures.js';
 import {
   MY_HUID,
@@ -26,10 +26,16 @@ import {
 } from '../helpers/readFixtures.js';
 import { startToolServer, type ToolServer } from '../helpers/toolServer.js';
 
-/** Адрес треда равен адресу стартового сообщения: это и есть проверяемая связка из бандла */
+/** Адрес треда равен адресу стартового сообщения */
 const THREAD_ID = '11111111-1111-4111-8111-111111111111';
 const EMPTY_THREAD_ID = '22222222-2222-4222-8222-222222222222';
 const UNKNOWN_THREAD_ID = '33333333-3333-4333-8333-333333333333';
+/** Тред полигона, где пользователь не участник: в списке подписок его нет */
+const FOREIGN_THREAD_ID = '44444444-4444-4444-8444-444444444444';
+/** Тред другого чата, тоже вне списка подписок */
+const OTHER_CHAT_THREAD_ID = '55555555-5555-4555-8555-555555555555';
+/** Событие, которое делает пользователя участником треда: отправлять его нельзя */
+const THREAD_JOIN_EVENT = 'thread_join';
 
 const CHATS = [
   makeRawChat({ chatId: POLYGON_CHAT_ID, name: 'Избранное', chatType: 'notes' }),
@@ -52,13 +58,12 @@ function rawThread(threadId: string, chatId: string): Record<string, unknown> {
 let ring: KeyRing;
 let server: ToolServer;
 let threadEvents: Record<string, unknown>[];
-/** Понимает ли подложный сервер сужение списка тредов по чату: живьём это не проверялось */
-let narrowingSupported: boolean;
+let foreignThreadEvents: Record<string, unknown>[];
 
-async function buildThreadEvents(): Promise<Record<string, unknown>[]> {
+async function buildThreadEvents(threadId: string): Promise<Record<string, unknown>[]> {
   const common = {
     /* Топик и адрес события это САМ ТРЕД: тред и есть чат для своих сообщений */
-    groupChatId: THREAD_ID,
+    groupChatId: threadId,
     sender: MY_HUID,
     senderKeyId: ring.sender.keyId,
     senderPrivateKey: ring.sender.privateKey,
@@ -73,7 +78,7 @@ async function buildThreadEvents(): Promise<Record<string, unknown>[]> {
         msgId: syncId(1),
         from: MY_HUID,
         timestamp: '2026-09-08T07:01:00.000Z',
-        groupChatId: THREAD_ID,
+        groupChatId: threadId,
         body: 'первый ответ в треде',
       }),
     }),
@@ -85,7 +90,7 @@ async function buildThreadEvents(): Promise<Record<string, unknown>[]> {
         msgId: syncId(2),
         from: MY_HUID,
         timestamp: '2026-09-08T07:02:00.000Z',
-        groupChatId: THREAD_ID,
+        groupChatId: threadId,
         body: 'второй ответ в треде',
       }),
     }),
@@ -98,25 +103,37 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
-  narrowingSupported = true;
-  threadEvents = await buildThreadEvents();
+  threadEvents = await buildThreadEvents(THREAD_ID);
+  foreignThreadEvents = await buildThreadEvents(FOREIGN_THREAD_ID);
   server = await startToolServer({ ring, chats: CHATS });
 
-  server.mock.respondTo(THREAD_LIST_EVENT, (frame) => {
+  const listed = [rawThread(THREAD_ID, POLYGON_CHAT_ID), rawThread(EMPTY_THREAD_ID, POLYGON_CHAT_ID)];
+  const known: Record<string, unknown>[] = [
+    ...listed.map((thread) => ({ ...thread, active: true })),
+    { ...rawThread(FOREIGN_THREAD_ID, POLYGON_CHAT_ID), active: false },
+    { ...rawThread(OTHER_CHAT_THREAD_ID, OTHER_CHAT_ID), active: false },
+  ];
+  /* Сервер игнорирует сужение по чату и всегда отдаёт полный список подписок */
+  server.mock.respondTo(THREAD_LIST_EVENT, () => ({
+    status: 'ok',
+    response: { [THREAD_LIST_EVENT]: listed },
+  }));
+  server.mock.respondTo(THREAD_INFO_EVENT, (frame) => {
     const payload = frame.payload as Record<string, unknown>;
-    const threads = [
-      rawThread(THREAD_ID, POLYGON_CHAT_ID),
-      rawThread(EMPTY_THREAD_ID, POLYGON_CHAT_ID),
-    ];
-    const narrowed = payload['group_chat_id'] !== null;
-    return {
-      status: 'ok',
-      response: { [THREAD_LIST_EVENT]: narrowed && !narrowingSupported ? [] : threads },
-    };
+    const info = known.find((thread) => thread['thread_id'] === payload['thread_id']);
+    return info === undefined
+      ? { status: 'error', response: { error: 'thread_not_found' } }
+      : { status: 'ok', response: { [THREAD_INFO_EVENT]: info } };
   });
   server.mock.respondTo(EVENTS_HISTORY_EVENT, (frame) => {
     const payload = frame.payload as Record<string, unknown>;
-    const events = payload['group_chat_id'] === THREAD_ID ? threadEvents : [];
+    const requested = payload['group_chat_id'];
+    const events =
+      requested === THREAD_ID
+        ? threadEvents
+        : requested === FOREIGN_THREAD_ID
+          ? foreignThreadEvents
+          : [];
     /*
      * Признак продолжения сервер здесь ПРИСЫЛАЕТ: так проверяется, что при живом ответе
      * сервера выдача не обрастает меткой неподтверждённости.
@@ -126,6 +143,8 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  /* Чтение треда никогда не меняет участие пользователя */
+  expect(server.mock.framesOf(THREAD_JOIN_EVENT)).toHaveLength(0);
   await server.close();
 });
 
@@ -141,6 +160,9 @@ describe('get_thread по готовому адресу треда', () => {
 
     expect(payload.thread_id).toBe(THREAD_ID);
     expect(payload.chat_id).toBe(POLYGON_CHAT_ID);
+    expect(payload.source).toBe('thread_list');
+    expect(payload.participant).toBe(true);
+    expect(server.mock.framesOf(THREAD_INFO_EVENT)).toHaveLength(0);
     expect(payload.empty).toBe(false);
     expect(payload.messages.map((message) => message.message_id)).toEqual([syncId(1), syncId(2)]);
     expect(payload.messages[0]?.text).toBe('первый ответ в треде');
@@ -197,23 +219,49 @@ describe('get_thread по готовому адресу треда', () => {
 
     expect(payload.status).toBe('thread_not_found');
     expect(payload.status === 'thread_not_found' && payload.reason).toContain(UNKNOWN_THREAD_ID);
+    expect(payload.status === 'thread_not_found' && payload.next_step).toContain('message_id');
+    expect(server.mock.framesOf(EVENTS_HISTORY_EVENT)).toHaveLength(0);
   });
+});
 
-  it('сервер, не понимающий сужения по чату, не превращает живой тред в ненайденный', async () => {
-    narrowingSupported = false;
-
+describe('get_thread для треда вне списка подписок', () => {
+  it('читает чужой тред через справку thread_info, не делая пользователя участником', async () => {
     const payload = await server.callTool<GetThreadResult>('get_thread', {
       chat: 'Избранное',
-      thread_id: THREAD_ID,
+      thread_id: FOREIGN_THREAD_ID,
+    });
+    if (payload.status !== 'ok') {
+      throw new Error('ожидалась успешная выдача');
+    }
+
+    expect(payload.thread_id).toBe(FOREIGN_THREAD_ID);
+    expect(payload.chat_id).toBe(POLYGON_CHAT_ID);
+    expect(payload.source).toBe('direct');
+    expect(payload.participant).toBe(false);
+    expect(payload.messages.map((message) => message.text)).toEqual([
+      'первый ответ в треде',
+      'второй ответ в треде',
+    ]);
+    expect(server.mock.framesOf(THREAD_INFO_EVENT)[0]?.payload).toEqual({
+      thread_id: FOREIGN_THREAD_ID,
+    });
+    expect(server.mock.framesOf(THREAD_JOIN_EVENT)).toHaveLength(0);
+  });
+
+  it('тред, начатый в другом чате, это thread_not_found', async () => {
+    const payload = await server.callTool<GetThreadResult>('get_thread', {
+      chat: 'Избранное',
+      thread_id: OTHER_CHAT_THREAD_ID,
     });
 
-    expect(payload.status).toBe('ok');
-    expect(server.mock.framesOf(THREAD_LIST_EVENT)).toHaveLength(2);
+    expect(payload.status).toBe('thread_not_found');
+    expect(payload.status === 'thread_not_found' && payload.reason).toContain('в другом');
+    expect(server.mock.framesOf(EVENTS_HISTORY_EVENT)).toHaveLength(0);
   });
 });
 
 describe('get_thread по адресу стартового сообщения', () => {
-  it('выводит адрес треда из message_id и объявляет вывод неподтверждённым', async () => {
+  it('адрес треда равен message_id, и выдача по нему ничем не помечается', async () => {
     const payload = await server.callTool<GetThreadResult>('get_thread', {
       chat: 'Избранное',
       message_id: THREAD_ID,
@@ -223,8 +271,8 @@ describe('get_thread по адресу стартового сообщения',
     }
 
     expect(payload.thread_id).toBe(THREAD_ID);
-    expect(payload.form_status).toBe('bundle');
-    expect(payload.form_note).toContain('бандл');
+    expect(payload.source).toBe('thread_list');
+    expect(Object.keys(payload)).not.toContain('form_status');
     expect(payload.messages).toHaveLength(2);
   });
 

@@ -98,7 +98,8 @@ export class MessengerError extends Error {
   }
 }
 
-function messageOf(error: unknown): string {
+/** Текст ошибки любого вида: у `Error` его сообщение, у прочего строковое представление */
+export function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 

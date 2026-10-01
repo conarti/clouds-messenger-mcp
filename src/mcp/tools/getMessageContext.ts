@@ -19,6 +19,7 @@ import { decryptHistoryEvents, toMessages } from '../../protocol/decryptHistory.
 import { enrichMessages, type EnrichedMessage } from '../../protocol/enrichMessage.js';
 import { fetchEventBySyncId } from '../../protocol/eventInfo.js';
 import { fetchHistoryPage, type HistoryDirection } from '../../protocol/history.js';
+import { attachReplyCounts } from '../../protocol/threads.js';
 import type { ToolDeps } from './deps.js';
 
 export interface GetMessageContextInput {
@@ -81,10 +82,18 @@ export async function getMessageContext(
     lookup.event === undefined
       ? []
       : enrichMessages(toMessages(await decryptHistoryEvents(deps, [lookup.event])), chat);
-  const pivotMessage = pivotMessages[0];
+  const beforeRaw = await readSide(deps, chat, input.message_id, beforeCount, 'backward');
+  const afterRaw = await readSide(deps, chat, input.message_id, afterCount, 'forward');
 
-  const before = await readSide(deps, chat, input.message_id, beforeCount, 'backward');
-  const after = await readSide(deps, chat, input.message_id, afterCount, 'forward');
+  /* Один шаг счётчиков на всё окно: список тредов запрашивается не больше одного раза */
+  const counted = await attachReplyCounts(deps, [
+    ...beforeRaw,
+    ...pivotMessages.slice(0, 1),
+    ...afterRaw,
+  ]);
+  const before = counted.slice(0, beforeRaw.length);
+  const pivotMessage = pivotMessages.length > 0 ? counted[beforeRaw.length] : undefined;
+  const after = counted.slice(counted.length - afterRaw.length);
 
   deps.logger.debug('get_message_context: окно собрано', {
     chatId: chat.chat_id,

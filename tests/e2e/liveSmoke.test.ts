@@ -322,7 +322,7 @@ describe.runIf(process.env[E2E_ENV] === '1')(
     });
 
     it('список тредов полигона читается', async () => {
-      const threads = await fetchThreadList(deps, chatId);
+      const threads = await fetchThreadList(deps);
 
       expect(Array.isArray(threads)).toBe(true);
 

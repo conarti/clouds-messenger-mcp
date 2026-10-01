@@ -291,3 +291,19 @@ describe('обогащение сообщения контекстом чата'
     expect(enriched.is_self_chat).toBe(true);
   });
 });
+
+describe('стартовое сообщение треда', () => {
+  it('meta.thread_started:true даёт thread с адресом, равным message_id', () => {
+    const message = normalizeEvent(rawEvent({ meta: { activities: {}, thread_started: true } }));
+
+    expect(message?.thread).toEqual({ thread_id: SYNC_ID });
+  });
+
+  it('без признака поля thread нет вовсе', () => {
+    const plain = normalizeEvent(rawEvent({ meta: { activities: {} } }));
+    const withoutMeta = normalizeEvent(rawEvent());
+
+    expect(Object.keys(plain ?? {})).not.toContain('thread');
+    expect(Object.keys(withoutMeta ?? {})).not.toContain('thread');
+  });
+});

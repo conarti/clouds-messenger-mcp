@@ -6,17 +6,20 @@
  * поэтому здесь нет ни своей пагинации, ни своей формы сообщения. В тред и пишут обычной
  * отправкой, передав адрес треда как адрес чата.
  *
- * АДРЕС ТРЕДА РАВЕН АДРЕСУ СТАРТОВОГО СООБЩЕНИЯ, И ЭТО ЗНАНИЕ ИЗ БАНДЛА. В бандле
- * веб-клиента тред сопоставляется сообщению равенством `thread.group_chat_id === message.sync_id`,
- * а локальное создание треда прямо присваивает адресу треда `sync_id` сообщения. Живой
- * пробой это НЕ подтверждено, поэтому выдача по `message_id` несёт `form_status:'bundle'`,
- * а сама выведенная догадка обязательно ПРОВЕРЯЕТСЯ по списку тредов: несуществующий тред
- * лучше объявить ненайденным, чем прочитать историю по выдуманному адресу.
+ * АДРЕС ТРЕДА РАВЕН АДРЕСУ СТАРТОВОГО СООБЩЕНИЯ, И ЭТО ПОДТВЕРЖДЕНО ЖИВЬЁМ: `thread_id`
+ * совпадает с `sync_id` стартового сообщения (нашим `message_id`), а внутренний `msg_id`
+ * адресом треда не является. Поэтому вызов по `message_id` ничем не помечается, но
+ * существование треда всё равно ПРОВЕРЯЕТСЯ: несуществующий тред лучше объявить
+ * ненайденным, чем прочитать историю по выдуманному адресу.
  *
- * ФОРМА ЭЛЕМЕНТА СПИСКА ТРЕДОВ НАБЛЮДЕНА ЖИВЬЁМ, А СТРАНИЦА ТРЕДА НЕТ. Список тредов
- * прочитан живой пробой; страница треда читается тем же путём, что и история чата, но
- * живьём не подтверждена: в полигоне тредов нет. Поэтому чтение по готовому `thread_id`
- * метки неподтверждённости не несёт, пока сервер присылает признак продолжения, а без
+ * ЧУЖОЙ ТРЕД ТОЖЕ ЧИТАЕТСЯ. Список тредов содержит только подписки пользователя, поэтому
+ * промах по нему переспрашивается справкой `thread_info` (см. `findThread`). Выдача говорит,
+ * откуда взят тред (`source`) и участник ли пользователь (`participant`). Участие при чтении
+ * не меняется: `thread_join` не отправляется никогда.
+ *
+ * СТРАНИЦА ТРЕДА ПРОЧИТАНА ЖИВЬЁМ. Живая проба (issue #5) прочитала историю тредов тем же
+ * путём, что и историю чата, и сервер прислал признак продолжения `has_more_events`. Поэтому
+ * выдача метки неподтверждённости не несёт, пока сервер присылает признак продолжения, а без
  * него выдача честно объявляет неполноту.
  */
 import { resolveChat } from '../../chat/resolveChat.js';
@@ -30,7 +33,7 @@ import {
 } from '../../protocol/decryptHistory.js';
 import { enrichMessages, type EnrichedMessage } from '../../protocol/enrichMessage.js';
 import { fetchHistoryPage } from '../../protocol/history.js';
-import { findThread } from '../../protocol/threads.js';
+import { attachReplyCounts, findThread, type ThreadSource } from '../../protocol/threads.js';
 import type { ToolDeps } from './deps.js';
 
 export interface GetThreadInput {
@@ -57,7 +60,11 @@ export interface GetThreadOk {
   next_before?: string;
   /** Только из ответа сервера; иначе ключа нет, а неполнота объявлена в form_status */
   has_more?: boolean;
-  form_status?: 'bundle' | 'unconfirmed';
+  /** Откуда взят тред: `direct` означает точечную справку, а не список подписок */
+  source: ThreadSource;
+  /** Участник ли пользователь треда; чтение участие не меняет */
+  participant: boolean;
+  form_status?: 'unconfirmed';
   form_note?: string;
   /** Есть, только если хоть одно событие страницы не расшифровалось */
   decrypt_error_summary?: DecryptErrorSummary;
@@ -82,11 +89,6 @@ export type GetThreadResult = GetThreadOk | ThreadNotFound | ThreadInputInvalid 
 /** Дефолт лимита страницы треда: тред заметно короче чата, и полсотни здесь избыточны */
 export const DEFAULT_THREAD_LIMIT = 40;
 
-const DERIVED_NOTE =
-  'адрес треда выведен из message_id: в бандле веб-клиента адрес треда равен sync_id ' +
-  'стартового сообщения. Живой пробой равенство не подтверждено, но существование треда с ' +
-  'этим адресом проверено по списку тредов';
-
 const HAS_MORE_NOTE =
   'признак продолжения истории живьём не наблюдался: сервер не прислал поля has_more, ' +
   'поэтому ключа has_more в ответе нет. Обход продолжайте, передавая next_before в before, ' +
@@ -96,8 +98,8 @@ const INVALID_INPUT_NEXT_STEP =
   'передайте thread_id, если он у вас есть, либо message_id сообщения, от которого начат тред';
 
 const NOT_FOUND_NEXT_STEP =
-  'проверьте, что тред действительно начат от этого сообщения и в этом чате: список тредов ' +
-  'сервера его не содержит';
+  'адрес треда это message_id (sync_id) стартового сообщения; сообщения, от которых начаты ' +
+  'треды, видны по полю thread в истории чата';
 
 export async function getThread(deps: ToolDeps, input: GetThreadInput): Promise<GetThreadResult> {
   if (input.thread_id === undefined && input.message_id === undefined) {
@@ -114,20 +116,20 @@ export async function getThread(deps: ToolDeps, input: GetThreadInput): Promise<
   }
   const chat = resolved.chat;
 
-  const derived = input.thread_id === undefined;
   /* Ровно один из двух гарантированно есть: пустая пара отсеяна выше */
   const threadId = input.thread_id ?? (input.message_id as string);
 
-  const thread = await findThread(deps, { chatId: chat.chat_id, threadId });
-  if (thread === undefined) {
+  const found = await findThread(deps, { chatId: chat.chat_id, threadId });
+  if (found === undefined) {
     return {
       status: 'thread_not_found',
-      reason: derived
-        ? `в чате ${chat.chat_id} нет треда, начатого от сообщения ${threadId}`
-        : `в чате ${chat.chat_id} нет треда с адресом ${threadId}`,
+      reason:
+        `треда ${threadId} нет на сервере либо он начат не в чате ${chat.chat_id}, ` +
+        'а в другом',
       next_step: NOT_FOUND_NEXT_STEP,
     };
   }
+  const thread = found.thread;
 
   const limit = input.limit ?? DEFAULT_THREAD_LIMIT;
   const page = await fetchHistoryPage(deps, {
@@ -140,20 +142,14 @@ export async function getThread(deps: ToolDeps, input: GetThreadInput): Promise<
    * `chat_id` самого сообщения при этом равен адресу треда, потому что тред и есть его чат.
    */
   const decrypted = await decryptHistoryEvents(deps, page.events);
-  const messages = enrichMessages(toMessages(decrypted), chat);
+  const messages = await attachReplyCounts(deps, enrichMessages(toMessages(decrypted), chat));
   const decryptErrors = summarizeDecryptErrors(decrypted);
   const oldest = messages[0];
-
-  const notes = [
-    ...(derived ? [DERIVED_NOTE] : []),
-    ...(page.hasMore === undefined ? [HAS_MORE_NOTE] : []),
-  ];
-  const formStatus = derived ? 'bundle' : notes.length > 0 ? 'unconfirmed' : undefined;
 
   deps.logger.debug('get_thread: страница треда собрана', {
     chatId: chat.chat_id,
     count: messages.length,
-    derived,
+    source: found.source,
     decryptFailed: decryptErrors?.count ?? 0,
   });
 
@@ -161,11 +157,13 @@ export async function getThread(deps: ToolDeps, input: GetThreadInput): Promise<
     status: 'ok',
     thread_id: thread.thread_id,
     chat_id: thread.chat_id,
+    source: found.source,
+    participant: found.participant,
     empty: messages.length === 0,
     messages,
     ...(oldest !== undefined ? { next_before: oldest.message_id } : {}),
     ...(page.hasMore !== undefined ? { has_more: page.hasMore } : {}),
-    ...(formStatus !== undefined ? { form_status: formStatus, form_note: notes.join('; ') } : {}),
+    ...(page.hasMore === undefined ? { form_status: 'unconfirmed', form_note: HAS_MORE_NOTE } : {}),
     ...(decryptErrors !== undefined ? { decrypt_error_summary: decryptErrors } : {}),
     ...(decryptErrors?.transient === true ? { next_step: DECRYPT_RETRY_NEXT_STEP } : {}),
   };

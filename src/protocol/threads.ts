@@ -11,25 +11,36 @@
  * `last_event_inserted_at`, `inserted_at`, `updated_at`, `read_position_at`, `sorting_*`.
  * Метки неподтверждённости у этой формы нет.
  *
- * ЗАПРОС БЕЗ ЧАТА НАБЛЮДЁН ЖИВЬЁМ, С ЧАТОМ НЕТ. Живая проба спрашивала список с
- * `group_chat_id: null` и получила ВСЕ треды учётной записи. Сужение по конкретному чату
- * взято из кадров веб-клиента (bundle) и живьём не проверялось, поэтому пустой ответ на
- * суженный запрос НЕ считается доказательством отсутствия треда: вызывающий переспрашивает
- * полным списком (см. `findThread`).
+ * СПИСОК СОДЕРЖИТ ТОЛЬКО ПОДПИСКИ. Живая проба (issue #5) показала: в `thread_list` попадают
+ * лишь треды, где пользователь участник (`active: true`), а параметр `group_chat_id` сервер
+ * ИГНОРИРУЕТ и на любой запрос отдаёт полный список. Поэтому сужения по чату здесь нет, а тред
+ * вне списка ищется точечным `thread_info`: тот работает для любого треда, отвечает записью той
+ * же формы плюс `active` и ничем не меняет участие (в отличие от `thread_join`, который делает
+ * пользователя участником и потому не отправляется никогда).
+ *
+ * `counter` это ЧИСЛО ОТВЕТОВ в треде, а не непрочитанное: на живой пробе он совпал с длиной
+ * истории треда и у чужих тредов, и у тредов, где все ответы свои.
  */
 import { CHAT_LIST_SINCE_EPOCH, SYSTEM_TOPIC } from './chatList.js';
+import { messageOf } from './errors.js';
+import { PhoenixReplyError } from '../transport/ws/PhoenixClient.js';
 import { asObject, numberOr, stringOr } from '../util/json.js';
 import { parseIso } from '../util/timestamps.js';
 import type { HistoryDeps } from './history.js';
+import type { Message } from './messageShape.js';
 
 export const THREAD_LIST_EVENT = 'thread_list';
+export const THREAD_INFO_EVENT = 'thread_info';
+/** Код отказа `thread_info` на неизвестный адрес: снят живой пробой */
+const THREAD_NOT_FOUND_ERROR = 'thread_not_found';
 
 /** Запись треда: адрес самого треда, адрес родительского чата и метки свежести */
 export interface ThreadRecord {
   thread_id: string;
   /** Родительский чат: `group_chat_id` элемента списка */
   chat_id: string;
-  unread_count?: number;
+  /** `counter`: число ответов в треде, `0` возможен и у начатого треда */
+  replies_count?: number;
   /** `last_event_sync_id`: адрес последнего события треда */
   last_message_id?: string;
   /** ISO последней активности треда */
@@ -60,14 +71,14 @@ export function normalizeThread(raw: unknown): ThreadRecord | undefined {
   if (thread === undefined || threadId === undefined || chatId === undefined) {
     return undefined;
   }
-  const unread = numberOr(thread['counter']);
+  const replies = numberOr(thread['counter']);
   const lastMessageId = stringOr(thread['last_event_sync_id']);
   const lastActivity =
     isoOrAbsent(thread['last_event_inserted_at']) ?? isoOrAbsent(thread['updated_at']);
   return {
     thread_id: threadId,
     chat_id: chatId,
-    ...(unread !== undefined ? { unread_count: unread } : {}),
+    ...(replies !== undefined ? { replies_count: replies } : {}),
     ...(lastMessageId !== undefined ? { last_message_id: lastMessageId } : {}),
     ...(lastActivity !== undefined ? { last_activity: lastActivity } : {}),
   };
@@ -85,16 +96,10 @@ function extractThreads(response: unknown): unknown[] {
   return Array.isArray(response) ? response : [];
 }
 
-/**
- * Список тредов. Без `chatId` спрашивается всё (форма наблюдена живьём), с `chatId` сервер
- * просят сузить выдачу до одного чата (форма из бандла).
- */
-export async function fetchThreadList(
-  deps: HistoryDeps,
-  chatId?: string,
-): Promise<ThreadRecord[]> {
+/** Список тредов, где пользователь участник. Сервер всегда отдаёт его целиком */
+export async function fetchThreadList(deps: HistoryDeps): Promise<ThreadRecord[]> {
   const response = await deps.ws.request<unknown>(SYSTEM_TOPIC, THREAD_LIST_EVENT, {
-    group_chat_id: chatId ?? null,
+    group_chat_id: null,
     /* Та же метка начала эпохи, что и у списка чатов: формат снят с живого запроса */
     since: CHAT_LIST_SINCE_EPOCH,
     request_version: deps.config.protocol.threadListRequestVersion,
@@ -103,11 +108,42 @@ export async function fetchThreadList(
     const record = normalizeThread(entry);
     return record === undefined ? [] : [record];
   });
-  deps.logger.debug('список тредов получен', {
-    count: threads.length,
-    narrowed: chatId !== undefined,
-  });
+  deps.logger.debug('список тредов получен', { count: threads.length });
   return threads;
+}
+
+/** Запись `thread_info`: форма элемента списка плюс признак участия пользователя */
+export interface ThreadInfoRecord extends ThreadRecord {
+  active: boolean;
+}
+
+/**
+ * Точечная справка о любом треде, включая чужой. Неизвестный адрес это законный исход
+ * (`undefined`), а прочие отказы сервера пробрасываются, как и у списка тредов: молча
+ * превратить сбой в «треда нет» значило бы солгать вызывающему.
+ */
+export async function fetchThreadInfo(
+  deps: HistoryDeps,
+  threadId: string,
+): Promise<ThreadInfoRecord | undefined> {
+  let response: unknown;
+  try {
+    response = await deps.ws.request<unknown>(SYSTEM_TOPIC, THREAD_INFO_EVENT, {
+      thread_id: threadId,
+    });
+  } catch (error) {
+    if (error instanceof PhoenixReplyError && error.code === THREAD_NOT_FOUND_ERROR) {
+      return undefined;
+    }
+    throw error;
+  }
+  const raw = asObject(response)?.[THREAD_INFO_EVENT];
+  const record = normalizeThread(raw);
+  if (record === undefined) {
+    deps.logger.warn('справка о треде пришла без нормализуемой записи', { threadId });
+    return undefined;
+  }
+  return { ...record, active: asObject(raw)?.['active'] === true };
 }
 
 export interface FindThreadInput {
@@ -115,30 +151,110 @@ export interface FindThreadInput {
   threadId: string;
 }
 
+/** Откуда взят тред: список подписок либо точечная справка о треде */
+export type ThreadSource = 'thread_list' | 'direct';
+
+/** Найденный тред и то, откуда он взят */
+export interface FoundThread {
+  thread: ThreadRecord;
+  source: ThreadSource;
+  /** Участник ли пользователь: для списка всегда да, для справки это `active` */
+  participant: boolean;
+}
+
 /**
  * Тред по адресу внутри известного чата.
  *
- * ДВА ЗАХОДА, И ВТОРОЙ НЕ ЛИШНИЙ. Сначала спрашивается суженный список (дёшево), но пустой
- * ответ на него ничего не доказывает: сужение живьём не проверялось, и сервер, который его
- * не понимает, вернул бы пустоту на существующий тред. Поэтому пустой ответ переспрашивается
- * полной выдачей, форма которой наблюдена живьём.
- *
- * Принадлежность чату проверяется ЛОКАЛЬНО в обоих случаях: сервер, игнорирующий сужение,
- * иначе отдал бы чужой тред как свой.
+ * Сначала полный список подписок: тред, где пользователь участник, найдётся в нём. Промах
+ * ничего не доказывает, потому что чужих тредов в списке нет, и тогда спрашивается
+ * `thread_info`. Принадлежность чату проверяется ЛОКАЛЬНО в обоих случаях: тред другого
+ * чата своим не считается.
  */
 export async function findThread(
   deps: HistoryDeps,
   input: FindThreadInput,
-): Promise<ThreadRecord | undefined> {
-  const narrowed = await fetchThreadList(deps, input.chatId);
-  const found = narrowed.find(
-    (thread) => thread.thread_id === input.threadId && thread.chat_id === input.chatId,
-  );
-  if (found !== undefined || narrowed.length > 0) {
-    return found;
+): Promise<FoundThread | undefined> {
+  const listed = (await fetchThreadList(deps)).find((thread) => thread.thread_id === input.threadId);
+  if (listed !== undefined) {
+    return listed.chat_id === input.chatId
+      ? { thread: listed, source: 'thread_list', participant: true }
+      : undefined;
   }
-  const full = await fetchThreadList(deps);
-  return full.find(
-    (thread) => thread.thread_id === input.threadId && thread.chat_id === input.chatId,
+  const info = await fetchThreadInfo(deps, input.threadId);
+  if (info === undefined || info.chat_id !== input.chatId) {
+    return undefined;
+  }
+  const { active, ...thread } = info;
+  return { thread, source: 'direct', participant: active };
+}
+
+/**
+ * Предел одновременных справок `thread_info` на страницу: страница бывает в две сотни
+ * сообщений, и залп справок по каждому чужому треду упирался бы в ограничение частоты.
+ */
+const THREAD_INFO_CONCURRENCY = 4;
+
+/**
+ * Число ответов для стартовых сообщений тредов страницы.
+ *
+ * Один полный список подписок на страницу, и только если на ней есть хоть один тред; треды
+ * вне списка (чужие) переспрашиваются справкой `thread_info`. Любой сбой здесь НЕ ломает
+ * выдачу: число ответов это дополнение, и сообщение остаётся с `thread`, но без
+ * `replies_count`. Отказ списка не прячет счётчики насовсем: все треды страницы тогда
+ * идут справками.
+ */
+export async function attachReplyCounts<T extends Message>(
+  deps: HistoryDeps,
+  messages: readonly T[],
+): Promise<T[]> {
+  const threadIds = [
+    ...new Set(messages.flatMap((message) => (message.thread ? [message.thread.thread_id] : []))),
+  ];
+  if (threadIds.length === 0) {
+    return [...messages];
+  }
+
+  const records = new Map<string, ThreadRecord>();
+  try {
+    for (const record of await fetchThreadList(deps)) {
+      records.set(record.thread_id, record);
+    }
+  } catch (error) {
+    deps.logger.warn('список тредов не получен, счётчики ответов берутся справками', {
+      error: messageOf(error),
+    });
+  }
+
+  const unlisted = threadIds.filter((threadId) => !records.has(threadId));
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < unlisted.length) {
+      const threadId = unlisted[next] as string;
+      next += 1;
+      try {
+        const info = await fetchThreadInfo(deps, threadId);
+        if (info !== undefined) {
+          records.set(threadId, info);
+        }
+      } catch (error) {
+        deps.logger.warn('справка о треде не получена, тред отдан без счётчика ответов', {
+          threadId,
+          error: messageOf(error),
+        });
+      }
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(THREAD_INFO_CONCURRENCY, unlisted.length) }, worker),
   );
+
+  return messages.map((message) => {
+    if (message.thread === undefined) {
+      return message;
+    }
+    const repliesCount = records.get(message.thread.thread_id)?.replies_count;
+    return repliesCount === undefined
+      ? message
+      : { ...message, thread: { ...message.thread, replies_count: repliesCount } };
+  });
 }

@@ -14,6 +14,7 @@ import { resolveFailure, type ChatResolveFailure } from '../../chat/resolveFailu
 import { decryptHistoryEvents, toMessages } from '../../protocol/decryptHistory.js';
 import { enrichMessage, type EnrichedMessage } from '../../protocol/enrichMessage.js';
 import { fetchEventBySyncId } from '../../protocol/eventInfo.js';
+import { attachReplyCounts } from '../../protocol/threads.js';
 import { messageNotFound, type MessageNotFound } from './messageFailure.js';
 import type { ToolDeps } from './deps.js';
 
@@ -48,5 +49,7 @@ export async function getMessage(deps: ToolDeps, input: GetMessageInput): Promis
     return messageNotFound(`событие ${input.message_id} пришло без адреса и наружу отдано быть не может`);
   }
 
-  return { status: 'ok', chat_id: chat.chat_id, message: enrichMessage(message, chat) };
+  const enriched = enrichMessage(message, chat);
+  const [counted] = await attachReplyCounts(deps, [enriched]);
+  return { status: 'ok', chat_id: chat.chat_id, message: counted ?? enriched };
 }

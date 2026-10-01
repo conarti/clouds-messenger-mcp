@@ -216,6 +216,8 @@ export interface HistoryEventInput {
   reactionCounters?: string;
   myReactions?: string[];
   readByCount?: number;
+  /** Признак стартового сообщения треда во внешнем `meta`: живьём ключ либо `true`, либо отсутствует */
+  threadStarted?: boolean;
 }
 
 /** Внешнее событие истории целиком: конверт из cryptoFixtures плюс поля внешнего слоя */
@@ -239,13 +241,18 @@ export async function makeHistoryEvent(input: HistoryEventInput): Promise<Record
     inserted_at: input.insertedAt,
     sender: input.sender,
     read_by: readers,
-    ...(input.reactionCounters !== undefined
+    ...(input.reactionCounters !== undefined || input.threadStarted === true
       ? {
           meta: {
-            activities: {
-              reaction_counters: input.reactionCounters,
-              user_reactions: { emoji: input.myReactions ?? [], votes: [] },
-            },
+            ...(input.reactionCounters !== undefined
+              ? {
+                  activities: {
+                    reaction_counters: input.reactionCounters,
+                    user_reactions: { emoji: input.myReactions ?? [], votes: [] },
+                  },
+                }
+              : {}),
+            ...(input.threadStarted === true ? { thread_started: true } : {}),
           },
         }
       : {}),

@@ -14,22 +14,28 @@
  * тегом слоя чинится.
  */
 import { downloadAttachment as fetchAttachmentFile } from '../../attachments/downloader.js';
-import { resolveChat } from '../../chat/resolveChat.js';
+import { containerChatOf, resolveChat } from '../../chat/resolveChat.js';
 import { resolveFailure, type ChatResolveFailure } from '../../chat/resolveFailure.js';
 import { extractAttachments, selectAttachment } from '../../protocol/attachments.js';
 import { decryptHistoryEvents } from '../../protocol/decryptHistory.js';
 import { fetchEventBySyncId } from '../../protocol/eventInfo.js';
 import {
+  messageIdMissing,
+  messageIdOf,
   messageNotFound,
+  messageOutsideChat,
   messageNotReadable,
+  type MessageInputInvalid,
   type MessageNotFound,
   type MessageNotReadable,
 } from './messageFailure.js';
 import type { ToolDeps } from './deps.js';
 
 export interface DownloadAttachmentInput {
+  /** Чат, тред либо ссылка xlnk на сообщение */
   chat: string;
-  message_id: string;
+  /** Без него адрес берётся из `sync_id` ссылки в `chat` */
+  message_id?: string | undefined;
   /** Какое именно вложение: без него берётся первое вложение сообщения */
   file_id?: string | undefined;
 }
@@ -59,6 +65,7 @@ export type DownloadAttachmentResult =
   | AttachmentNotFound
   | MessageNotFound
   | MessageNotReadable
+  | MessageInputInvalid
   | ChatResolveFailure;
 
 const FORM_NOTE =
@@ -75,22 +82,33 @@ export async function downloadAttachment(
   deps: ToolDeps,
   input: DownloadAttachmentInput,
 ): Promise<DownloadAttachmentResult> {
+  const messageId = messageIdOf(input);
+  if (messageId === undefined) {
+    return messageIdMissing();
+  }
   const resolved = await resolveChat(deps, input.chat);
   if (resolved.kind !== 'resolved') {
     return resolveFailure(resolved);
   }
-  const chat = resolved.chat;
 
-  const lookup = await fetchEventBySyncId(deps, { chatId: chat.chat_id, syncId: input.message_id });
+  const lookup = await fetchEventBySyncId(deps, { chatId: resolved.chat.chat_id, syncId: messageId });
   if (lookup.event === undefined) {
-    return messageNotFound(`в чате ${chat.chat_id} нет события с sync_id ${input.message_id}`);
+    return messageNotFound(`в чате ${resolved.chat.chat_id} нет события с sync_id ${messageId}`);
+  }
+  /*
+   * Файловая служба отдаёт вложение треда только по адресу ТРЕДА (по адресу родителя 404),
+   * поэтому сообщение треда, адресованное родительским чатом, качается адресом треда.
+   */
+  const chat = await containerChatOf(deps, resolved.chat, lookup.event);
+  if (chat === undefined) {
+    return messageOutsideChat(messageId, resolved.chat.chat_id);
   }
 
   const [decrypted] = await decryptHistoryEvents(deps, [lookup.event]);
   if (decrypted?.inner === undefined) {
     /* Ссылка на файл лежит в зашифрованном теле: без него неизвестно даже, есть ли вложение */
     return messageNotReadable(
-      decrypted?.error ?? `тело события ${input.message_id} не разобрано, вложения в нём не видны`,
+      decrypted?.error ?? `тело события ${messageId} не разобрано, вложения в нём не видны`,
     );
   }
 
@@ -100,8 +118,8 @@ export async function downloadAttachment(
       status: 'file_not_found',
       reason:
         input.file_id === undefined
-          ? `у сообщения ${input.message_id} нет вложений`
-          : `у сообщения ${input.message_id} нет вложения с file_id ${input.file_id}`,
+          ? `у сообщения ${messageId} нет вложений`
+          : `у сообщения ${messageId} нет вложения с file_id ${input.file_id}`,
       next_step: NOT_FOUND_NEXT_STEP,
     };
   }

@@ -260,6 +260,24 @@ describe('связь ответа во внутреннем событии', () 
     expect(replyTypeOf('notes')).toBe('chat');
     expect(replyTypeOf('unknown')).toBe('group_chat');
   });
+
+  it('ответ в треде берёт reply_type у родительского чата, а тред без родителя считается групповым', () => {
+    const replyTypeInThread = (parentKind: string | undefined): string | undefined =>
+      buildReplyLink({
+        quotedInner,
+        quotedMessageId: QUOTED_ID,
+        chat: {
+          ...chatOf('thread'),
+          parent_chat_id: PEER_HUID,
+          ...(parentKind !== undefined ? { parent_kind: parentKind } : {}),
+        },
+        sourceName: '',
+      })?.reply_type;
+
+    expect(replyTypeInThread('channel')).toBe('channel');
+    expect(replyTypeInThread('group_chat')).toBe('group_chat');
+    expect(replyTypeInThread(undefined)).toBe('group_chat');
+  });
 });
 
 describe('сборка кадра отправки', () => {

@@ -12,7 +12,7 @@
  * САМО СООБЩЕНИЕ НЕОБЯЗАТЕЛЬНО. Оно читается отдельно и отсутствует, если его уже нет;
  * окна вокруг при этом целы, потому что строятся границами, а не от найденного события.
  */
-import { resolveChat } from '../../chat/resolveChat.js';
+import { containerChatOf, resolveChat } from '../../chat/resolveChat.js';
 import { resolveFailure, type ChatResolveFailure } from '../../chat/resolveFailure.js';
 import type { ChatRecord } from '../../protocol/chatShape.js';
 import { decryptHistoryEvents, toMessages } from '../../protocol/decryptHistory.js';
@@ -21,10 +21,19 @@ import { fetchEventBySyncId } from '../../protocol/eventInfo.js';
 import { fetchHistoryPage, type HistoryDirection } from '../../protocol/history.js';
 import { attachReplyCounts } from '../../protocol/threads.js';
 import type { ToolDeps } from './deps.js';
+import {
+  messageIdMissing,
+  messageIdOf,
+  messageOutsideChat,
+  type MessageInputInvalid,
+  type MessageNotFound,
+} from './messageFailure.js';
 
 export interface GetMessageContextInput {
+  /** Чат, тред либо ссылка xlnk на сообщение */
   chat: string;
-  message_id: string;
+  /** Без него адрес берётся из `sync_id` ссылки в `chat` */
+  message_id?: string | undefined;
   before_count?: number | undefined;
   after_count?: number | undefined;
 }
@@ -41,7 +50,11 @@ export interface GetMessageContextOk {
   after: EnrichedMessage[];
 }
 
-export type GetMessageContextResult = GetMessageContextOk | ChatResolveFailure;
+export type GetMessageContextResult =
+  | GetMessageContextOk
+  | MessageNotFound
+  | MessageInputInvalid
+  | ChatResolveFailure;
 
 export const DEFAULT_CONTEXT_WINDOW = 10;
 
@@ -71,19 +84,28 @@ export async function getMessageContext(
   const beforeCount = input.before_count ?? DEFAULT_CONTEXT_WINDOW;
   const afterCount = input.after_count ?? DEFAULT_CONTEXT_WINDOW;
 
+  const messageId = messageIdOf(input);
+  if (messageId === undefined) {
+    return messageIdMissing();
+  }
   const resolved = await resolveChat(deps, input.chat);
   if (resolved.kind !== 'resolved') {
     return resolveFailure(resolved);
   }
-  const chat = resolved.chat;
 
-  const lookup = await fetchEventBySyncId(deps, { chatId: chat.chat_id, syncId: input.message_id });
+  const lookup = await fetchEventBySyncId(deps, { chatId: resolved.chat.chat_id, syncId: messageId });
+  /* Сообщение треда, адресованное родительским чатом: окно строится по истории треда */
+  const chat =
+    lookup.event === undefined ? resolved.chat : await containerChatOf(deps, resolved.chat, lookup.event);
+  if (chat === undefined) {
+    return messageOutsideChat(messageId, resolved.chat.chat_id);
+  }
   const pivotMessages =
     lookup.event === undefined
       ? []
       : enrichMessages(toMessages(await decryptHistoryEvents(deps, [lookup.event])), chat);
-  const beforeRaw = await readSide(deps, chat, input.message_id, beforeCount, 'backward');
-  const afterRaw = await readSide(deps, chat, input.message_id, afterCount, 'forward');
+  const beforeRaw = await readSide(deps, chat, messageId, beforeCount, 'backward');
+  const afterRaw = await readSide(deps, chat, messageId, afterCount, 'forward');
 
   /* Один шаг счётчиков на всё окно: список тредов запрашивается не больше одного раза */
   const counted = await attachReplyCounts(deps, [
@@ -105,7 +127,7 @@ export async function getMessageContext(
   return {
     status: 'ok',
     chat_id: chat.chat_id,
-    pivot_message_id: input.message_id,
+    pivot_message_id: messageId,
     before,
     ...(pivotMessage !== undefined ? { message: pivotMessage } : {}),
     after,

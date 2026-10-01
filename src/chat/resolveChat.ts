@@ -14,9 +14,14 @@
  * ЛИЧНЫЙ ЧАТ АДРЕСУЕТСЯ ИМЕНЕМ ЧЕЛОВЕКА. На проводе у всех личных чатов одно и то же имя,
  * поэтому перед сравнением список проходит резолв имён собеседников: без него запрос по
  * фамилии не совпал бы ни с чем, а запрос «personal chat» совпал бы со всеми сразу.
+ *
+ * ТРЕД АДРЕСУЕТСЯ СВОИМ АДРЕСОМ. В списке чатов тредов нет, поэтому UUID, не найденный в
+ * списке, переспрашивается справкой `thread_info`: она отвечает про любой тред и участие не
+ * меняет. Ссылка на сообщение из клиента принимается как есть, адресом служит её `chat_id`.
  */
 import {
   SELF_CHAT_TYPE,
+  THREAD_CHAT_KIND,
   normalizeChats,
   resolvePeerNames,
   sortChatsByFreshness,
@@ -25,6 +30,9 @@ import {
 } from '../protocol/chatShape.js';
 import { fetchChatList, type ChatListDeps } from '../protocol/chatList.js';
 import { UUID_PATTERN } from '../protocol/messageShape.js';
+import { fetchThreadInfo, type ThreadRecord } from '../protocol/threads.js';
+import { stringOr } from '../util/json.js';
+import { parseMessageLink } from './messageLink.js';
 
 /** Резолв ходит и за списком чатов, и за именами собеседников: без второго людей не найти */
 export type ResolveChatDeps = ChatListDeps & PeerNamesDeps;
@@ -92,8 +100,61 @@ function decide(matched: readonly ChatRecord[], reason: string): ResolveChatResu
   return { kind: 'not_found', reason };
 }
 
+/**
+ * Запись треда в форме чата. Адрес и получатели свои, а имя и участники родительского чата:
+ * у треда ни того, ни другого нет, а без участников упоминание в треде не нашло бы никого.
+ * Родителя нет в списке (тред чужого чата): запись без имени и без участников, это не отказ.
+ */
+export function toThreadChat(
+  thread: ThreadRecord,
+  parent: ChatRecord | undefined,
+  participant?: boolean,
+): ChatRecord {
+  return {
+    chat_id: thread.thread_id,
+    ...(parent?.name !== undefined ? { name: parent.name } : {}),
+    kind: THREAD_CHAT_KIND,
+    key_ids: thread.key_ids.length > 0 ? thread.key_ids : (parent?.key_ids ?? []),
+    member_huids: parent?.member_huids ?? [],
+    is_self: false,
+    parent_chat_id: thread.chat_id,
+    ...(parent !== undefined ? { parent_kind: parent.kind } : {}),
+    ...(participant !== undefined ? { thread_participant: participant } : {}),
+  };
+}
+
+/**
+ * Чат, в котором событие лежит на самом деле. Ссылка на сообщение треда может нести адрес
+ * родительского чата, а файловая служба, окно истории и ответ требуют адрес треда. Событие из
+ * треда ЭТОГО чата даёт запись треда. Событие постороннего чата даёт `undefined`: адресное
+ * чтение ищет по всем чатам, и выдать чужое сообщение за сообщение этого чата нельзя.
+ */
+export async function containerChatOf(
+  deps: ResolveChatDeps,
+  chat: ChatRecord,
+  event: Record<string, unknown>,
+): Promise<ChatRecord | undefined> {
+  const eventChatId = stringOr(event['group_chat_id']);
+  if (eventChatId === undefined || eventChatId.toLowerCase() === chat.chat_id.toLowerCase()) {
+    return chat;
+  }
+  if (!isChatId(eventChatId)) {
+    return undefined;
+  }
+  const info = await fetchThreadInfo(deps, eventChatId);
+  if (info === undefined || info.chat_id !== chat.chat_id) {
+    return undefined;
+  }
+  const { active, ...thread } = info;
+  return toThreadChat(thread, chat, active);
+}
+
 export async function resolveChat(deps: ResolveChatDeps, query: string): Promise<ResolveChatResult> {
-  const trimmed = query.trim();
+  const link = parseMessageLink(query);
+  if (link !== undefined && link.chatId === undefined) {
+    return { kind: 'not_found', reason: 'в ссылке на сообщение нет параметра chat_id с UUID' };
+  }
+  const trimmed = link?.chatId ?? query.trim();
   if (trimmed.length === 0) {
     return { kind: 'not_found', reason: 'пустой запрос: адресовать чат нечем' };
   }
@@ -104,13 +165,22 @@ export async function resolveChat(deps: ResolveChatDeps, query: string): Promise
   );
 
   if (isChatId(trimmed)) {
-    const exact = chats.find((chat) => chat.chat_id.toLowerCase() === trimmed.toLowerCase());
+    const lowered = trimmed.toLowerCase();
+    const exact = chats.find((chat) => chat.chat_id.toLowerCase() === lowered);
     if (exact !== undefined) {
       return { kind: 'resolved', chat: exact };
     }
+    const info = await fetchThreadInfo(deps, lowered);
+    if (info !== undefined) {
+      const { active, ...thread } = info;
+      const parent = chats.find((chat) => chat.chat_id === thread.chat_id);
+      return { kind: 'resolved', chat: toThreadChat(thread, parent, active) };
+    }
     return {
       kind: 'not_found',
-      reason: `нет такого чата в списке: идентификатор ${trimmed} не встретился среди доступных чатов`,
+      reason:
+        `идентификатор ${trimmed} не встретился ни среди чатов из list_chats, ни среди тредов: ` +
+        'справка thread_info такого треда не знает',
     };
   }
 

@@ -174,7 +174,12 @@ export function buildReplyLink(input: ReplyLinkInput): ReplyLink | undefined {
     payload: { type, body, from, ...(Array.isArray(mentions) ? { mentions } : {}) },
     sync_id: input.quotedMessageId,
     sender_conn_type: 'cts',
-    reply_type: replyTypeOf(input.chat.kind),
+    /*
+     * У ответа в треде тип берётся у РОДИТЕЛЬСКОГО чата: своего вида у треда на проводе нет.
+     * Живьём это не проверено; тред неизвестного родителя считается групповым, как и прочий
+     * незнакомый вид.
+     */
+    reply_type: replyTypeOf(input.chat.parent_kind ?? input.chat.kind),
     source_name: input.sourceName,
     group_chat_id: input.chat.chat_id,
   };

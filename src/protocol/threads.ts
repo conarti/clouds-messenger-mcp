@@ -45,6 +45,11 @@ export interface ThreadRecord {
   last_message_id?: string;
   /** ISO последней активности треда */
   last_activity?: string;
+  /**
+   * `keys`: получатели обёртки контент-ключа. Живьём это тот же набор, что у родительского
+   * чата; без него в тред нельзя отправить, потому что записи в списке чатов у треда нет.
+   */
+  key_ids: string[];
 }
 
 /** Непонятная метка времени приравнивается к отсутствующей: гадать про формат нечем */
@@ -75,12 +80,17 @@ export function normalizeThread(raw: unknown): ThreadRecord | undefined {
   const lastMessageId = stringOr(thread['last_event_sync_id']);
   const lastActivity =
     isoOrAbsent(thread['last_event_inserted_at']) ?? isoOrAbsent(thread['updated_at']);
+  const rawKeys: unknown[] = Array.isArray(thread['keys']) ? thread['keys'] : [];
   return {
     thread_id: threadId,
     chat_id: chatId,
     ...(replies !== undefined ? { replies_count: replies } : {}),
     ...(lastMessageId !== undefined ? { last_message_id: lastMessageId } : {}),
     ...(lastActivity !== undefined ? { last_activity: lastActivity } : {}),
+    key_ids: rawKeys.flatMap((entry) => {
+      const keyId = stringOr(entry);
+      return keyId === undefined ? [] : [keyId];
+    }),
   };
 }
 

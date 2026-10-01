@@ -10,6 +10,8 @@ import { FakeAuthProvider } from '../../src/auth/FakeAuthProvider.js';
 import { resolveChat, type ResolveChatDeps } from '../../src/chat/resolveChat.js';
 import { resolveFailure } from '../../src/chat/resolveFailure.js';
 import { CHAT_LIST_EVENT } from '../../src/protocol/chatList.js';
+import { THREAD_INFO_EVENT } from '../../src/protocol/threads.js';
+import { PhoenixReplyError } from '../../src/transport/ws/PhoenixClient.js';
 import { resetProfileCache } from '../../src/protocol/profiles.js';
 import type { PhoenixClient } from '../../src/transport/ws/types.js';
 import { createLogger } from '../../src/util/logger.js';
@@ -106,7 +108,8 @@ describe('адресация идентификатором', () => {
     const resolved = await resolveChat(createDeps(CHATS), '00000000-0000-4000-8000-00000000dead');
 
     expect(resolved.kind).toBe('not_found');
-    expect(resolved.kind === 'not_found' && resolved.reason).toContain('нет такого чата в списке');
+    expect(resolved.kind === 'not_found' && resolved.reason).toContain('list_chats');
+    expect(resolved.kind === 'not_found' && resolved.reason).toContain('тредов');
   });
 });
 
@@ -216,5 +219,133 @@ describe('форма отказа', () => {
     expect(failure.status).toBe('chat_not_found');
     expect(failure.status === 'chat_not_found' && failure.reason).toContain('бухгалтерия');
     expect(failure.next_step).toContain('list_chats');
+  });
+});
+
+/** Синтетические адреса тредов: в списке чатов их нет и быть не может */
+const THREAD_ID = 'd1e2f3a4-b5c6-4d7e-8f90-a1b2c3d4e5f6';
+const ORPHAN_THREAD_ID = 'e2f3a4b5-c6d7-4e8f-90a1-b2c3d4e5f6a7';
+const ABSENT_PARENT_ID = 'f3a4b5c6-d7e8-4f90-a1b2-c3d4e5f6a7b8';
+
+function rawThreadInfo(threadId: string, parentId: string): Record<string, unknown> {
+  return {
+    thread_id: threadId,
+    group_chat_id: parentId,
+    counter: 2,
+    keys: ['thread-key-id-a', 'thread-key-id-b'],
+    active: false,
+  };
+}
+
+/** Сервер со списком чатов и справкой о тредах; запросы пишутся по именам событий */
+function createThreadDeps(): { deps: ResolveChatDeps; events: string[] } {
+  const events: string[] = [];
+  const known = [rawThreadInfo(THREAD_ID, OTHER_CHAT_ID), rawThreadInfo(ORPHAN_THREAD_ID, ABSENT_PARENT_ID)];
+  const chats = [
+    ...CHATS.filter((chat) => chat['group_chat_id'] !== OTHER_CHAT_ID),
+    makeRawChat({
+      chatId: OTHER_CHAT_ID,
+      name: 'Дежурка',
+      chatType: 'group_chat',
+      memberHuids: [MY_HUID, PEER_HUID],
+      keys: ['parent-key-id'],
+    }),
+  ];
+  const ws: PhoenixClient = {
+    request: (async (_topic: string, event: string, payload: Record<string, unknown>) => {
+      events.push(event);
+      if (event === THREAD_INFO_EVENT) {
+        const info = known.find((thread) => thread['thread_id'] === payload['thread_id']);
+        if (info === undefined) {
+          throw new PhoenixReplyError('thread_not_found', 'system', event, {});
+        }
+        return { [THREAD_INFO_EVENT]: info };
+      }
+      return { [CHAT_LIST_EVENT]: chats };
+    }) as PhoenixClient['request'],
+    close: async () => undefined,
+  };
+  return { deps: { ...createDeps([]), ws }, events };
+}
+
+describe('адресация тредом', () => {
+  it('адрес треда вне списка чатов резолвится справкой thread_info в запись треда', async () => {
+    const { deps, events } = createThreadDeps();
+
+    const resolved = await resolveChat(deps, THREAD_ID);
+    if (resolved.kind !== 'resolved') {
+      throw new Error('ожидалось разрешение');
+    }
+
+    expect(resolved.chat).toEqual({
+      chat_id: THREAD_ID,
+      name: 'Дежурка',
+      kind: 'thread',
+      parent_chat_id: OTHER_CHAT_ID,
+      parent_kind: 'group_chat',
+      key_ids: ['thread-key-id-a', 'thread-key-id-b'],
+      member_huids: [MY_HUID, PEER_HUID],
+      is_self: false,
+      thread_participant: false,
+    });
+    expect(events.filter((event) => event === THREAD_INFO_EVENT)).toHaveLength(1);
+  });
+
+  it('тред чата, которого нет в списке, резолвится без имени и без участников', async () => {
+    const { deps } = createThreadDeps();
+
+    const resolved = await resolveChat(deps, ORPHAN_THREAD_ID);
+    if (resolved.kind !== 'resolved') {
+      throw new Error('ожидалось разрешение');
+    }
+
+    expect(resolved.chat.parent_chat_id).toBe(ABSENT_PARENT_ID);
+    expect(resolved.chat.member_huids).toEqual([]);
+    expect(Object.keys(resolved.chat)).not.toContain('name');
+    expect(resolved.chat.key_ids).toEqual(['thread-key-id-a', 'thread-key-id-b']);
+  });
+
+  it('чат из списка справку о треде не спрашивает', async () => {
+    const { deps, events } = createThreadDeps();
+
+    await resolveChat(deps, OTHER_CHAT_ID);
+
+    expect(events).not.toContain(THREAD_INFO_EVENT);
+  });
+
+  it('ссылка xlnk резолвится по своему chat_id', async () => {
+    const { deps } = createThreadDeps();
+
+    const resolved = await resolveChat(
+      deps,
+      `https://xlnk.clouds.org.ru/open/message?sync_id=${POLYGON_CHAT_ID}&chat_id=${THREAD_ID}`,
+    );
+
+    expect(resolved.kind === 'resolved' && resolved.chat.chat_id).toBe(THREAD_ID);
+  });
+
+  it('ссылка без chat_id это промах без обращения к серверу', async () => {
+    const { deps, events } = createThreadDeps();
+
+    const resolved = await resolveChat(deps, `xlnk.clouds.org.ru/open/message?sync_id=${THREAD_ID}`);
+
+    expect(resolved.kind).toBe('not_found');
+    expect(events).toHaveLength(0);
+  });
+
+  it('текст промаха называет оба источника адресов', async () => {
+    const { deps } = createThreadDeps();
+
+    const resolved = await resolveChat(deps, ABSENT_PARENT_ID);
+    if (resolved.kind === 'resolved') {
+      throw new Error('ожидался промах');
+    }
+    const failure = resolveFailure(resolved);
+
+    expect(failure.status === 'chat_not_found' && failure.reason).toContain('list_chats');
+    expect(failure.status === 'chat_not_found' && failure.reason).toContain('тредов');
+    expect(failure.next_step).toContain('list_chats');
+    expect(failure.next_step).toContain('адрес треда');
+    expect(failure.next_step).toContain('xlnk');
   });
 });

@@ -22,6 +22,7 @@
  * выдача метки неподтверждённости не несёт, пока сервер присылает признак продолжения, а без
  * него выдача честно объявляет неполноту.
  */
+import { parseMessageLink } from '../../chat/messageLink.js';
 import { resolveChat } from '../../chat/resolveChat.js';
 import { resolveFailure, type ChatResolveFailure } from '../../chat/resolveFailure.js';
 import {
@@ -33,10 +34,17 @@ import {
 } from '../../protocol/decryptHistory.js';
 import { enrichMessages, type EnrichedMessage } from '../../protocol/enrichMessage.js';
 import { fetchHistoryPage } from '../../protocol/history.js';
-import { attachReplyCounts, findThread, type ThreadSource } from '../../protocol/threads.js';
+import { UUID_PATTERN } from '../../protocol/messageShape.js';
+import {
+  attachReplyCounts,
+  findThread,
+  type FoundThread,
+  type ThreadSource,
+} from '../../protocol/threads.js';
 import type { ToolDeps } from './deps.js';
 
 export interface GetThreadInput {
+  /** Родительский чат треда либо адрес самого треда: тогда thread_id и message_id не нужны */
   chat: string;
   /** Готовый адрес треда: путь без догадок */
   thread_id?: string | undefined;
@@ -95,19 +103,36 @@ const HAS_MORE_NOTE =
   'пока очередная страница не окажется пустой';
 
 const INVALID_INPUT_NEXT_STEP =
-  'передайте thread_id, если он у вас есть, либо message_id сообщения, от которого начат тред';
+  'передайте thread_id, если он у вас есть, либо message_id сообщения, от которого начат тред, ' +
+  'либо сам адрес треда в chat';
 
 const NOT_FOUND_NEXT_STEP =
   'адрес треда это message_id (sync_id) стартового сообщения; сообщения, от которых начаты ' +
   'треды, видны по полю thread в истории чата';
 
+function threadNotFound(threadId: string, chatId: string): ThreadNotFound {
+  return {
+    status: 'thread_not_found',
+    reason: `треда ${threadId} нет на сервере либо он начат не в чате ${chatId}, а в другом`,
+    next_step: NOT_FOUND_NEXT_STEP,
+  };
+}
+
+function invalidInput(): ThreadInputInvalid {
+  return {
+    status: 'invalid_input',
+    reason: 'не передан ни thread_id, ни message_id, а в chat не адрес треда: адресовать тред нечем',
+    next_step: INVALID_INPUT_NEXT_STEP,
+  };
+}
+
 export async function getThread(deps: ToolDeps, input: GetThreadInput): Promise<GetThreadResult> {
-  if (input.thread_id === undefined && input.message_id === undefined) {
-    return {
-      status: 'invalid_input',
-      reason: 'не передан ни thread_id, ни message_id: адресовать тред нечем',
-      next_step: INVALID_INPUT_NEXT_STEP,
-    };
+  const requestedThreadId = input.thread_id ?? input.message_id;
+  /* Имя чата адресом треда не бывает: без идентификаторов такой вызов к серверу не идёт */
+  const chatMayBeThread =
+    UUID_PATTERN.test(input.chat.trim()) || parseMessageLink(input.chat) !== undefined;
+  if (requestedThreadId === undefined && !chatMayBeThread) {
+    return invalidInput();
   }
 
   const resolved = await resolveChat(deps, input.chat);
@@ -116,18 +141,32 @@ export async function getThread(deps: ToolDeps, input: GetThreadInput): Promise<
   }
   const chat = resolved.chat;
 
-  /* Ровно один из двух гарантированно есть: пустая пара отсеяна выше */
-  const threadId = input.thread_id ?? (input.message_id as string);
-
-  const found = await findThread(deps, { chatId: chat.chat_id, threadId });
-  if (found === undefined) {
-    return {
-      status: 'thread_not_found',
-      reason:
-        `треда ${threadId} нет на сервере либо он начат не в чате ${chat.chat_id}, ` +
-        'а в другом',
-      next_step: NOT_FOUND_NEXT_STEP,
+  let found: FoundThread | undefined;
+  if (chat.parent_chat_id !== undefined) {
+    /*
+     * В chat уже адрес треда: резолв нашёл его справкой, и второй раз тред не ищется. Без этой
+     * ветки поиск сверял бы родителя треда с самим тредом и не находил его никогда.
+     */
+    if (requestedThreadId !== undefined && requestedThreadId !== chat.chat_id) {
+      return threadNotFound(requestedThreadId, chat.parent_chat_id);
+    }
+    found = {
+      thread: {
+        thread_id: chat.chat_id,
+        chat_id: chat.parent_chat_id,
+        key_ids: chat.key_ids,
+      },
+      source: 'direct',
+      participant: chat.thread_participant ?? false,
     };
+  } else {
+    if (requestedThreadId === undefined) {
+      return invalidInput();
+    }
+    found = await findThread(deps, { chatId: chat.chat_id, threadId: requestedThreadId });
+    if (found === undefined) {
+      return threadNotFound(requestedThreadId, chat.chat_id);
+    }
   }
   const thread = found.thread;
 

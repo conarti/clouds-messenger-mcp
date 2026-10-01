@@ -12,9 +12,15 @@
  * ПОВТОР ВЫЗОВА СОЗДАЁТ ВТОРОЕ СООБЩЕНИЕ. Идентификатор отправки генерируется на каждый
  * вызов, а серверный дедуп по повторному `sync_id` не подтверждён.
  *
+ * ТРЕД ЭТО ЧАТ И ДЛЯ ОТПРАВКИ. Кадр в тред снят с официального клиента: обычный `message_new`
+ * в топике треда, адрес треда и во внешней нагрузке, и во внутреннем событии, получатели это
+ * ключи треда, никакой метки родителя. Поэтому тред адресуется так же, как в `get_thread`:
+ * адресом треда в `chat`, либо родительским чатом плюс `thread_id` или `message_id`.
+ * `thread_join` при этом не отправляется никогда.
+ *
  * Ошибкой MCP наружу уходит только отказ сервера, потому что чинить его вызывающему нечем.
  */
-import { resolveChat } from '../../chat/resolveChat.js';
+import { resolveChat, toThreadChat } from '../../chat/resolveChat.js';
 import { resolveFailure, type ChatResolveFailure } from '../../chat/resolveFailure.js';
 import { resolvePerson } from '../../chat/resolvePerson.js';
 import type { ChatRecord } from '../../protocol/chatShape.js';
@@ -29,9 +35,11 @@ import {
   type ReplyLink,
 } from '../../protocol/mutations.js';
 import { fetchProfilesByHuids } from '../../protocol/profiles.js';
+import { findThread } from '../../protocol/threads.js';
 import { stringOr } from '../../util/json.js';
 import { createRequestId } from '../../transport/requestId.js';
 import type { ToolDeps } from './deps.js';
+import type { ThreadNotFound } from './getThread.js';
 
 export interface SendMessageInput {
   chat: string;
@@ -40,6 +48,10 @@ export interface SendMessageInput {
   reply_to?: string | undefined;
   /** Кого упомянуть: huid участника чата либо его однозначное имя */
   mentions?: string[] | undefined;
+  /** Адрес треда внутри чата из `chat`: сообщение уходит в тред */
+  thread_id?: string | undefined;
+  /** Адрес стартового сообщения треда: альтернатива `thread_id` */
+  message_id?: string | undefined;
 }
 
 /** Потолок длины текста; тем же числом ограничена схема параметра */
@@ -50,6 +62,8 @@ export interface SendMessageSent {
   chat_id: string;
   /** Имя чата, если оно у чата есть: по одному UUID человек не узнает адресата */
   chat_name?: string;
+  /** Есть только у отправки в тред: тогда chat_id это адрес треда, а здесь его родитель */
+  parent_chat_id?: string;
   /** Идентификатор отправки: он же адрес сообщения в истории */
   message_id: string;
   /** Метка сервера; отсутствует, если сервер её не прислал */
@@ -98,7 +112,38 @@ export type SendMessageResult =
   | SendMessageSent
   | ReplyTargetNotFound
   | MentionFailure
+  | ThreadNotFound
   | ChatResolveFailure;
+
+const THREAD_NOT_FOUND_NEXT_STEP =
+  'адрес треда это message_id (sync_id) стартового сообщения, его видно по полю thread в ' +
+  'истории чата; передайте его в thread_id вместе с родительским чатом в chat, либо сам адрес ' +
+  'треда в chat';
+
+/**
+ * Чат назначения: сам резолвнутый чат либо тред внутри него. Промах по треду это статус без
+ * единого кадра: отправить в основной чат то, что предназначалось треду, хуже, чем не
+ * отправить вовсе.
+ */
+async function resolveTarget(
+  deps: ToolDeps,
+  chat: ChatRecord,
+  threadId: string | undefined,
+): Promise<ChatRecord | ThreadNotFound> {
+  if (threadId === undefined) {
+    return chat;
+  }
+  const notFound: ThreadNotFound = {
+    status: 'thread_not_found',
+    reason: `треда ${threadId} нет на сервере либо он начат не в чате ${chat.chat_id}`,
+    next_step: THREAD_NOT_FOUND_NEXT_STEP,
+  };
+  if (chat.parent_chat_id !== undefined) {
+    return threadId === chat.chat_id ? chat : notFound;
+  }
+  const found = await findThread(deps, { chatId: chat.chat_id, threadId });
+  return found === undefined ? notFound : toThreadChat(found.thread, chat, found.participant);
+}
 
 const REPLY_TARGET_NEXT_STEP =
   'сверьте reply_to: возьмите message_id текстового сообщения из выдачи get_history этого же ' +
@@ -265,7 +310,11 @@ export async function sendMessage(
   if (resolved.kind !== 'resolved') {
     return resolveFailure(resolved);
   }
-  const chat = resolved.chat;
+  const target = await resolveTarget(deps, resolved.chat, input.thread_id ?? input.message_id);
+  if ('status' in target) {
+    return target;
+  }
+  const chat = target;
 
   let text = input.text;
   let mentions: OutgoingMention[] = [];
@@ -290,6 +339,7 @@ export async function sendMessage(
 
   deps.logger.info('send_message: отправка', {
     chatId: chat.chat_id,
+    parentChatId: chat.parent_chat_id,
     syncId,
     textLength: text.length,
     isReply: reply !== undefined,
@@ -309,6 +359,7 @@ export async function sendMessage(
     status: 'sent',
     chat_id: chat.chat_id,
     ...(chat.name !== undefined ? { chat_name: chat.name } : {}),
+    ...(chat.parent_chat_id !== undefined ? { parent_chat_id: chat.parent_chat_id } : {}),
     message_id: syncId,
     ...(ack.inserted_at !== undefined ? { inserted_at: ack.inserted_at } : {}),
     ...(reply !== undefined ? { reply_to: { message_id: reply.sync_id } } : {}),

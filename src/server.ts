@@ -102,6 +102,24 @@ const REPLY_FIELD_NOTE =
   ' Ответ на другое сообщение несёт поле reply_to: {message_id, from?, from_name?, text_preview?}; ' +
   'message_id годится для get_message, text_preview это начало цитаты. У прочих сообщений поля нет.';
 
+/** Параметр `chat` инструментов чтения одного сообщения: чат, тред либо ссылка на сообщение */
+const MESSAGE_CHAT_DESCRIPTION =
+  'Идентификатор чата (UUID), запрос по имени, адрес треда (UUID) либо ссылка xlnk на ' +
+  'сообщение как есть (https://xlnk.clouds.org.ru/open/message?sync_id=...&chat_id=...): из ' +
+  'ссылки берётся chat_id, а sync_id подставляется в message_id, если тот не передан';
+
+/** `message_id` инструментов чтения одного сообщения: необязателен при ссылке в `chat` */
+function messageIdParameter(description: string) {
+  return z
+    .string()
+    .regex(UUID_PATTERN)
+    .optional()
+    .describe(
+      `${description}. Можно не передавать, если в chat ссылка xlnk на сообщение; без обоих ` +
+        'вызов вернёт invalid_input',
+    );
+}
+
 export interface CreateServerOptions {
   config: Config;
   logger: Logger;
@@ -262,7 +280,10 @@ export function createServer(options: CreateServerOptions): McpServer {
         chat: z
           .string()
           .min(1)
-          .describe('Идентификатор чата (UUID) либо запрос по имени: «Дежурка», «Избранное»'),
+          .describe(
+            'Идентификатор чата (UUID), адрес треда (UUID), ссылка xlnk на сообщение либо запрос ' +
+              'по имени: «Дежурка», «Избранное»',
+          ),
         limit: z
           .number()
           .int()
@@ -310,11 +331,8 @@ export function createServer(options: CreateServerOptions): McpServer {
         THREAD_FIELD_NOTE +
         REPLY_FIELD_NOTE,
       inputSchema: {
-        chat: z.string().min(1).describe('Идентификатор чата (UUID) либо запрос по имени'),
-        message_id: z
-          .string()
-          .regex(UUID_PATTERN)
-          .describe('Идентификатор сообщения (UUID) из выдачи get_history'),
+        chat: z.string().min(1).describe(MESSAGE_CHAT_DESCRIPTION),
+        message_id: messageIdParameter('Идентификатор сообщения (UUID) из выдачи get_history'),
       },
       annotations: { readOnlyHint: true },
     },
@@ -332,8 +350,8 @@ export function createServer(options: CreateServerOptions): McpServer {
         THREAD_FIELD_NOTE +
         REPLY_FIELD_NOTE,
       inputSchema: {
-        chat: z.string().min(1).describe('Идентификатор чата (UUID) либо запрос по имени'),
-        message_id: z.string().regex(UUID_PATTERN).describe('Идентификатор сообщения (UUID) в центре окна'),
+        chat: z.string().min(1).describe(MESSAGE_CHAT_DESCRIPTION),
+        message_id: messageIdParameter('Идентификатор сообщения (UUID) в центре окна'),
         before_count: z
           .number()
           .int()
@@ -361,7 +379,7 @@ export function createServer(options: CreateServerOptions): McpServer {
       description:
         'Сообщения треда. Тред это чат: у него собственный идентификатор, читается он теми же ' +
         'страницами и той же формой сообщений, а пишут в него обычной отправкой в этот идентификатор. ' +
-        'Адрес треда равен message_id стартового сообщения. Читается и тред, где пользователь не ' +
+        'Адрес треда равен message_id стартового сообщения; его можно передать прямо в chat. Читается и тред, где пользователь не ' +
         'участник: список тредов содержит только подписки, поэтому промах по нему переспрашивается ' +
         'справкой о треде; source:"direct" означает, что тред найден справкой, а не в списке, ' +
         'participant говорит, участник ли пользователь. Чтение участие не меняет. Стоит три-четыре ' +
@@ -372,7 +390,10 @@ export function createServer(options: CreateServerOptions): McpServer {
         chat: z
           .string()
           .min(1)
-          .describe('Родительский чат треда: идентификатор (UUID) либо запрос по имени'),
+          .describe(
+            'Родительский чат треда (идентификатор UUID либо запрос по имени) либо адрес самого ' +
+              'треда: тогда thread_id и message_id не нужны',
+          ),
         thread_id: z
           .string()
           .regex(UUID_PATTERN)
@@ -461,11 +482,8 @@ export function createServer(options: CreateServerOptions): McpServer {
         'веб-клиента, а потоковый шифр с файла не снимается, поэтому у зашифрованного вложения в ' +
         'ответе стоит encrypted:true и на диске лежит шифротекст.',
       inputSchema: {
-        chat: z.string().min(1).describe('Идентификатор чата (UUID) либо запрос по имени'),
-        message_id: z
-          .string()
-          .regex(UUID_PATTERN)
-          .describe('Идентификатор сообщения (UUID) с вложением'),
+        chat: z.string().min(1).describe(MESSAGE_CHAT_DESCRIPTION),
+        message_id: messageIdParameter('Идентификатор сообщения (UUID) с вложением'),
         file_id: z
           .string()
           .min(1)
@@ -496,12 +514,18 @@ export function createServer(options: CreateServerOptions): McpServer {
         'создаёт ВТОРОЕ сообщение: если ответ потерян, сначала проверьте get_history. Неоднозначный или незнакомый чат ничего не отправляет и ' +
         'отвечает статусом ambiguous_chat с кандидатами или chat_not_found. Успех отвечает ' +
         'status:"sent" с chat_id, chat_name, message_id и inserted_at, у ответа ещё и reply_to, ' +
-        'при упоминаниях ещё и mentions [{huid, name}].',
+        'при упоминаниях ещё и mentions [{huid, name}], при отправке в тред ещё и parent_chat_id. ' +
+        'В тред пишут тремя способами: адрес треда в chat, либо родительский чат в chat плюс ' +
+        'thread_id, либо плюс message_id стартового сообщения. Тред не найден: статус ' +
+        'thread_not_found, ничего не отправлено. Участником треда отправка пользователя не делает.',
       inputSchema: {
         chat: z
           .string()
           .min(1)
-          .describe('Идентификатор чата (UUID) либо запрос по имени: «Дежурка», «Избранное»'),
+          .describe(
+            'Идентификатор чата (UUID), адрес треда (UUID), ссылка xlnk на сообщение (берётся её ' +
+              'chat_id) либо запрос по имени: «Дежурка», «Избранное»',
+          ),
         text: z
           .string()
           .min(1)
@@ -512,7 +536,8 @@ export function createServer(options: CreateServerOptions): McpServer {
           .regex(UUID_PATTERN)
           .optional()
           .describe(
-            'Ответить на сообщение: его message_id (UUID) из выдачи get_history этого же чата. ' +
+            'Ответить на сообщение: его message_id (UUID) из выдачи get_history этого же чата ' +
+              '(при отправке в тред из выдачи get_thread этого треда). ' +
               'Цитата собирается из самого сообщения. Ненайденное сообщение ничего не отправляет ' +
               'и отвечает статусом reply_target_not_found',
           ),
@@ -527,6 +552,23 @@ export function createServer(options: CreateServerOptions): McpServer {
               'человека дважды, передайте его дважды). Ненайденный человек (mention_not_found), ' +
               'неоднозначное имя (ambiguous_mention, с кандидатами) или отсутствие места в ' +
               'тексте (mention_not_in_text) отменяют отправку целиком',
+          ),
+        thread_id: z
+          .string()
+          .regex(UUID_PATTERN)
+          .optional()
+          .describe(
+            'Отправить в тред этого чата: идентификатор треда (UUID). Не нужен, если в chat уже ' +
+              'адрес треда',
+          ),
+        message_id: z
+          .string()
+          .regex(UUID_PATTERN)
+          .optional()
+          .describe(
+            'СТАРТОВОЕ сообщение треда (UUID), то есть сообщение родительского чата, от которого ' +
+              'начат тред: отправка уходит в этот тред. Альтернатива thread_id (адрес треда равен ' +
+              'message_id стартового сообщения). Это НЕ ответ на сообщение: для ответа есть reply_to',
           ),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },

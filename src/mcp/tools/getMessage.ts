@@ -9,18 +9,27 @@
  * по которому вызывающий ветвится сам, а не MCP-ошибка: сообщение могло быть удалено, и
  * это штатный факт переписки.
  */
-import { resolveChat } from '../../chat/resolveChat.js';
+import { containerChatOf, resolveChat } from '../../chat/resolveChat.js';
 import { resolveFailure, type ChatResolveFailure } from '../../chat/resolveFailure.js';
 import { decryptHistoryEvents, toMessages } from '../../protocol/decryptHistory.js';
 import { enrichMessage, type EnrichedMessage } from '../../protocol/enrichMessage.js';
 import { fetchEventBySyncId } from '../../protocol/eventInfo.js';
 import { attachReplyCounts } from '../../protocol/threads.js';
-import { messageNotFound, type MessageNotFound } from './messageFailure.js';
+import {
+  messageIdMissing,
+  messageIdOf,
+  messageNotFound,
+  messageOutsideChat,
+  type MessageInputInvalid,
+  type MessageNotFound,
+} from './messageFailure.js';
 import type { ToolDeps } from './deps.js';
 
 export interface GetMessageInput {
+  /** Чат, тред либо ссылка xlnk на сообщение */
   chat: string;
-  message_id: string;
+  /** Без него адрес берётся из `sync_id` ссылки в `chat` */
+  message_id?: string | undefined;
 }
 
 export interface GetMessageOk {
@@ -29,24 +38,36 @@ export interface GetMessageOk {
   message: EnrichedMessage;
 }
 
-export type GetMessageResult = GetMessageOk | MessageNotFound | ChatResolveFailure;
+export type GetMessageResult =
+  | GetMessageOk
+  | MessageNotFound
+  | MessageInputInvalid
+  | ChatResolveFailure;
 
 export async function getMessage(deps: ToolDeps, input: GetMessageInput): Promise<GetMessageResult> {
+  const messageId = messageIdOf(input);
+  if (messageId === undefined) {
+    return messageIdMissing();
+  }
   const resolved = await resolveChat(deps, input.chat);
   if (resolved.kind !== 'resolved') {
     return resolveFailure(resolved);
   }
-  const chat = resolved.chat;
 
-  const lookup = await fetchEventBySyncId(deps, { chatId: chat.chat_id, syncId: input.message_id });
+  const lookup = await fetchEventBySyncId(deps, { chatId: resolved.chat.chat_id, syncId: messageId });
   const found = lookup.event;
   if (found === undefined) {
-    return messageNotFound(`в чате ${chat.chat_id} нет события с sync_id ${input.message_id}`);
+    return messageNotFound(`в чате ${resolved.chat.chat_id} нет события с sync_id ${messageId}`);
+  }
+  /* Сообщение треда, адресованное родительским чатом, отдаётся с адресом и контекстом треда */
+  const chat = await containerChatOf(deps, resolved.chat, found);
+  if (chat === undefined) {
+    return messageOutsideChat(messageId, resolved.chat.chat_id);
   }
 
   const [message] = toMessages(await decryptHistoryEvents(deps, [found]));
   if (message === undefined) {
-    return messageNotFound(`событие ${input.message_id} пришло без адреса и наружу отдано быть не может`);
+    return messageNotFound(`событие ${messageId} пришло без адреса и наружу отдано быть не может`);
   }
 
   const enriched = enrichMessage(message, chat);

@@ -157,6 +157,7 @@ describe('normalizeThread', () => {
       replies_count: 3,
       last_message_id: '00000000-0000-4000-8000-000000000009',
       last_activity: '2026-09-08T07:04:00.000Z',
+      key_ids: ['recipient-key-id-a'],
     });
   });
 
@@ -166,10 +167,10 @@ describe('normalizeThread', () => {
     expect(normalizeThread('не объект')).toBeUndefined();
   });
 
-  it('ключевой материал треда наружу не уходит', () => {
-    const record = normalizeThread(rawThread(THREAD_ID, POLYGON_CHAT_ID));
+  it('получатели треда остаются во внутренней записи: без них в тред не отправить', () => {
+    const record = normalizeThread({ ...rawThread(THREAD_ID, POLYGON_CHAT_ID), keys: 'не массив' });
 
-    expect(JSON.stringify(record)).not.toContain('recipient-key-id-a');
+    expect(record?.key_ids).toEqual([]);
   });
 });
 
@@ -285,7 +286,8 @@ describe('get_thread: разбор входа', () => {
   it('без thread_id и без message_id вызов не идёт к серверу вовсе', async () => {
     const { deps, calls } = createDeps(forbidden('ws.request'));
 
-    const result = await getThread(deps, { chat: POLYGON_CHAT_ID });
+    /* Имя чата адресом треда быть не может, поэтому промах виден без сервера */
+    const result = await getThread(deps, { chat: 'Избранное' });
 
     expect(result.status).toBe('invalid_input');
     expect(result.status === 'invalid_input' && result.next_step).toContain('thread_id');

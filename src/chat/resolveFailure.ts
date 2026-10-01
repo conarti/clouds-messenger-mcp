@@ -32,7 +32,9 @@ const AMBIGUOUS_NEXT_STEP =
   'идентификатор chat_id одного из candidates';
 
 const NOT_FOUND_NEXT_STEP =
-  'уточните запрос либо возьмите chat_id из выдачи list_chats и передайте его в chat';
+  'уточните запрос либо передайте в chat адрес из одного из двух источников: chat_id из ' +
+  'выдачи list_chats или адрес треда (thread_id из поля thread сообщения, либо ссылку ' +
+  'xlnk на сообщение как есть)';
 
 export function resolveFailure(unresolved: UnresolvedChat): ChatResolveFailure {
   if (unresolved.kind === 'ambiguous') {

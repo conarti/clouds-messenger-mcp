@@ -118,13 +118,15 @@ describe('регистрация покрыта категориями', () => {
     expect(registered).toHaveLength(10);
   });
 
-  it('send_message принимает ровно chat и text', async () => {
+  it('send_message принимает ровно chat, text и необязательный reply_to', async () => {
     const tools = await listRegisteredTools();
     const sendMessageTool = tools.find((tool) => tool.name === 'send_message');
 
     expect(Object.keys(sendMessageTool?.inputSchema.properties ?? {}).sort()).toEqual([
       'chat',
+      'reply_to',
       'text',
     ]);
+    expect(sendMessageTool?.inputSchema.required).toEqual(['chat', 'text']);
   });
 });

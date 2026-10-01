@@ -16,14 +16,30 @@
 import sodium from 'libsodium-wrappers-sumo';
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { SendMessageResult } from '../../src/mcp/tools/sendMessage.js';
+import { EVENT_INFO_EVENT } from '../../src/protocol/eventInfo.js';
+import { EVENTS_HISTORY_EVENT } from '../../src/protocol/history.js';
 import { MESSAGE_NEW_EVENT } from '../../src/protocol/mutations.js';
 import { makeKeyRing, type KeyRing } from '../helpers/cryptoFixtures.js';
-import { OTHER_CHAT_ID, POLYGON_CHAT_ID, makeRawChat } from '../helpers/readFixtures.js';
+import {
+  OTHER_CHAT_ID,
+  PEER_HUID,
+  POLYGON_CHAT_ID,
+  makeHistoryEvent,
+  makeInnerText,
+  makeRawChat,
+  syncId,
+} from '../helpers/readFixtures.js';
 import { startToolServer, type ToolServer } from '../helpers/toolServer.js';
 
 const INSERTED_AT = '2026-09-08T07:10:00.000Z';
 const TEXT = 'привет из проверки';
 const NONCE_BYTES = 24;
+/** Цитируемое сообщение полигона и сообщение другого чата: оба лежат на подложном сервере */
+const QUOTED_ID = syncId(11);
+const FOREIGN_ID = syncId(12);
+const MISSING_ID = syncId(13);
+const QUOTED_TEXT = 'исходный вопрос';
+const AUTHOR_NAME = 'Синтетический Автор';
 
 /** Кадр отправки, как он приезжает на мок */
 interface SentPayload {
@@ -38,6 +54,28 @@ let ring: KeyRing;
 let server: ToolServer;
 /** Переключатель подложного сервера: им проверяется путь прикладного отказа */
 let sendRejects: boolean;
+let storedEvents: Record<string, unknown>[];
+
+async function buildStoredEvents(): Promise<Record<string, unknown>[]> {
+  const make = (id: string, chatId: string) =>
+    makeHistoryEvent({
+      syncId: id,
+      groupChatId: chatId,
+      insertedAt: '2026-09-08T07:00:00.000Z',
+      sender: PEER_HUID,
+      senderKeyId: ring.sender.keyId,
+      senderPrivateKey: ring.sender.privateKey,
+      recipient: ring.recipients[0],
+      inner: makeInnerText({
+        msgId: id,
+        from: PEER_HUID,
+        timestamp: '2026-09-08T07:00:00.000Z',
+        groupChatId: chatId,
+        body: QUOTED_TEXT,
+      }),
+    });
+  return [await make(QUOTED_ID, POLYGON_CHAT_ID), await make(FOREIGN_ID, OTHER_CHAT_ID)];
+}
 
 function chats(): Record<string, unknown>[] {
   return [
@@ -95,7 +133,22 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   sendRejects = false;
-  server = await startToolServer({ ring, chats: chats() });
+  storedEvents = await buildStoredEvents();
+  server = await startToolServer({
+    ring,
+    chats: chats(),
+    profiles: [{ huid: PEER_HUID, name: AUTHOR_NAME }],
+  });
+  server.mock.respondTo(EVENT_INFO_EVENT, (frame) => {
+    const requested = (frame.payload as Record<string, unknown>)['sync_ids'] as string[];
+    return {
+      status: 'ok',
+      response: {
+        info: storedEvents.filter((event) => requested.includes(event['sync_id'] as string)),
+      },
+    };
+  });
+  server.mock.respondTo(EVENTS_HISTORY_EVENT, () => ({ status: 'ok', response: { history: [] } }));
   server.mock.respondToTopic(`groupchat:${POLYGON_CHAT_ID}`, MESSAGE_NEW_EVENT, () =>
     sendRejects
       ? { status: 'error', response: { error: 'invalid_keys' } }
@@ -198,6 +251,75 @@ describe('отправка одним вызовом', () => {
     expect(first.status === 'sent' && first.message_id).toBe(frames[0]?.sync_id);
     expect(second.status === 'sent' && second.message_id).toBe(frames[1]?.sync_id);
     expect(frames[0]?.sync_id).not.toBe(frames[1]?.sync_id);
+  });
+});
+
+describe('ответ на сообщение', () => {
+  it('кладёт во внутреннее событие цитату, собранную из самого сообщения', async () => {
+    const payload = await server.callTool<SendMessageResult>('send_message', {
+      chat: 'Избранное',
+      text: TEXT,
+      reply_to: QUOTED_ID,
+    });
+    if (payload.status !== 'sent') {
+      throw new Error(`ожидалась отправка, пришло ${payload.status}`);
+    }
+    expect(payload.reply_to).toEqual({ message_id: QUOTED_ID });
+
+    const frames = sentFrames();
+    expect(frames).toHaveLength(1);
+    const sent = frames[0];
+    if (sent === undefined) {
+      throw new Error('кадр отправки не найден');
+    }
+    const inner = decryptSent(sent, 0);
+    expect(inner['body']).toBe(TEXT);
+    expect(inner['reply']).toEqual({
+      payload: { type: 'text', body: QUOTED_TEXT, from: PEER_HUID },
+      sync_id: QUOTED_ID,
+      sender_conn_type: 'cts',
+      /* Чат с собой отдельного значения не имеет и считается личным */
+      reply_type: 'chat',
+      source_name: AUTHOR_NAME,
+      group_chat_id: POLYGON_CHAT_ID,
+    });
+  });
+
+  it('обычная отправка не несёт ни reply в событии, ни reply_to в ответе', async () => {
+    const payload = await server.callTool<SendMessageResult>('send_message', {
+      chat: 'Избранное',
+      text: TEXT,
+    });
+    const sent = sentFrames()[0];
+    if (sent === undefined) {
+      throw new Error('кадр отправки не найден');
+    }
+
+    expect(Object.keys(payload)).not.toContain('reply_to');
+    expect(Object.keys(decryptSent(sent, 0))).not.toContain('reply');
+  });
+
+  it('несуществующее и чужое сообщение дают reply_target_not_found без единого кадра', async () => {
+    for (const target of [MISSING_ID, FOREIGN_ID]) {
+      const payload = await server.callTool<SendMessageResult>('send_message', {
+        chat: 'Избранное',
+        text: TEXT,
+        reply_to: target,
+      });
+      expect(payload.status).toBe('reply_target_not_found');
+      expect(payload.status === 'reply_target_not_found' && payload.next_step.length).toBeGreaterThan(0);
+    }
+    expect(sentFrames()).toHaveLength(0);
+  });
+
+  it('адрес не в форме UUID отвергается схемой без единого кадра', async () => {
+    await server.callToolExpectingError('send_message', {
+      chat: 'Избранное',
+      text: TEXT,
+      reply_to: 'не-идентификатор',
+    });
+
+    expect(sentFrames()).toHaveLength(0);
   });
 });
 

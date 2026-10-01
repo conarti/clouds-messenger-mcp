@@ -29,12 +29,14 @@ import {
   buildTextInnerEvent,
   sendMessageNew,
   type MessageNewRequest,
+  buildReplyLink,
+  replyTypeOf,
 } from '../../src/protocol/mutations.js';
 import type { KdcKey, RestClient } from '../../src/transport/types.js';
 import type { PhoenixClient } from '../../src/transport/ws/types.js';
 import { createLogger } from '../../src/util/logger.js';
 import { makeKeyRing, type KeyRing } from '../helpers/cryptoFixtures.js';
-import { MY_HUID, POLYGON_CHAT_ID, makeRawChat } from '../helpers/readFixtures.js';
+import { MY_HUID, PEER_HUID, POLYGON_CHAT_ID, makeRawChat } from '../helpers/readFixtures.js';
 import { createTestConfig } from '../helpers/testConfig.js';
 
 const SYNC_ID = '00000000-0000-4000-8000-000000000001';
@@ -161,6 +163,102 @@ describe('внутреннее событие текста', () => {
       stealth_forwarding: false,
       body: 'привет',
     });
+  });
+});
+
+describe('связь ответа во внутреннем событии', () => {
+  const QUOTED_ID = '7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d';
+  const quotedInner = {
+    type: 'text',
+    msg_id: MSG_ID,
+    from: PEER_HUID,
+    timestamp: '2026-09-08T07:00:00.000Z',
+    group_chat_id: POLYGON_CHAT_ID,
+    body: 'исходный вопрос',
+  };
+
+  function chatOf(kind: string): ChatRecord {
+    return { chat_id: POLYGON_CHAT_ID, kind, key_ids: [], member_huids: [], is_self: kind === 'notes' };
+  }
+
+  it('reply собирается в снятой форме и кладётся в событие только по запросу', () => {
+    const reply = buildReplyLink({
+      quotedInner,
+      quotedMessageId: QUOTED_ID,
+      chat: chatOf('group_chat'),
+      sourceName: 'Синтетический Автор',
+    });
+
+    expect(reply).toEqual({
+      payload: { type: 'text', body: 'исходный вопрос', from: PEER_HUID },
+      sync_id: QUOTED_ID,
+      sender_conn_type: 'cts',
+      reply_type: 'group_chat',
+      source_name: 'Синтетический Автор',
+      group_chat_id: POLYGON_CHAT_ID,
+    });
+
+    const base = {
+      huid: MY_HUID,
+      groupChatId: POLYGON_CHAT_ID,
+      text: 'ответ',
+      msgId: MSG_ID,
+      timestamp: '2026-09-08T07:10:00.000Z',
+    };
+    const plain = buildTextInnerEvent(base);
+    const withReply = buildTextInnerEvent({ ...base, ...(reply !== undefined ? { reply } : {}) });
+
+    expect(Object.keys(plain)).not.toContain('reply');
+    expect(withReply).toEqual({ ...plain, reply });
+  });
+
+  it('упоминания цитаты переезжают в payload, как у живого клиента', () => {
+    const mentions = [{ mention_type: 'user', mention_id: 'm1', mention_data: { conn_type: 'cts' } }];
+    const reply = buildReplyLink({
+      quotedInner: { ...quotedInner, mentions },
+      quotedMessageId: QUOTED_ID,
+      chat: chatOf('group_chat'),
+      sourceName: '',
+    });
+
+    expect(reply?.payload.mentions).toEqual(mentions);
+  });
+
+  it('картинка с подписью цитатой не собирается: цитировать можно только текст и ссылку', () => {
+    const imageInner = {
+      ...quotedInner,
+      type: 'image',
+      body: 'подпись к снимку',
+      payload: {
+        file_name: 'снимок.png',
+        file_mime_type: 'image/png',
+        file_id: 'c0ffee00-0000-4000-8000-000000000001',
+      },
+      link_file_id: 'c0ffee00-0000-4000-8000-000000000002',
+    };
+    const asImage = buildReplyLink({
+      quotedInner: imageInner,
+      quotedMessageId: QUOTED_ID,
+      chat: chatOf('group_chat'),
+      sourceName: '',
+    });
+    const asLink = buildReplyLink({
+      quotedInner: { ...quotedInner, type: 'link' },
+      quotedMessageId: QUOTED_ID,
+      chat: chatOf('group_chat'),
+      sourceName: '',
+    });
+
+    expect(asImage).toBeUndefined();
+    expect(asLink?.payload.type).toBe('link');
+  });
+
+  it('reply_type это тип чата: заметки и личный чат дают chat', () => {
+    expect(replyTypeOf('group_chat')).toBe('group_chat');
+    expect(replyTypeOf('channel')).toBe('channel');
+    expect(replyTypeOf('chat')).toBe('chat');
+    expect(replyTypeOf('notes')).toBe('chat');
+    expect(replyTypeOf('unknown')).toBe('group_chat');
   });
 });
 

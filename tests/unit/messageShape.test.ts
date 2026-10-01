@@ -8,12 +8,17 @@
 import { describe, expect, it } from 'vitest';
 import { normalizeChat } from '../../src/protocol/chatShape.js';
 import { enrichMessage } from '../../src/protocol/enrichMessage.js';
-import { UUID_PATTERN, normalizeEvent } from '../../src/protocol/messageShape.js';
+import {
+  REPLY_PREVIEW_MAX_LENGTH,
+  UUID_PATTERN,
+  normalizeEvent,
+} from '../../src/protocol/messageShape.js';
 import {
   makeInnerImage,
   makeInnerLink,
   makeInnerText,
   makeRawChat,
+  makeReply,
   MY_HUID,
   PEER_HUID,
   POLYGON_CHAT_ID,
@@ -305,5 +310,87 @@ describe('стартовое сообщение треда', () => {
 
     expect(Object.keys(plain ?? {})).not.toContain('thread');
     expect(Object.keys(withoutMeta ?? {})).not.toContain('thread');
+  });
+});
+
+describe('связь ответа', () => {
+  const QUOTED_ID = '7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d';
+  const quote = {
+    syncId: QUOTED_ID,
+    from: PEER_HUID,
+    body: 'исходный вопрос',
+    sourceName: 'Синтетический Автор',
+    groupChatId: POLYGON_CHAT_ID,
+  };
+
+  function innerWith(reply: unknown): Record<string, unknown> {
+    return {
+      ...makeInnerText({
+        msgId: '5b2c8e10-7d44-4c1a-8f9b-2a6e0c3d5f81',
+        from: MY_HUID,
+        timestamp: '2026-09-08T07:14:29.000Z',
+        groupChatId: POLYGON_CHAT_ID,
+        body: MESSAGE_TEXT,
+      }),
+      reply,
+    };
+  }
+
+  it('reply внутреннего события даёт reply_to с адресом, автором, именем и началом цитаты', () => {
+    const message = normalizeEvent(rawEvent(), { inner: innerWith(makeReply(quote)) });
+
+    expect(message?.reply_to).toEqual({
+      message_id: QUOTED_ID,
+      from: PEER_HUID,
+      from_name: 'Синтетический Автор',
+      text_preview: 'исходный вопрос',
+    });
+  });
+
+  it('длинная цитата обрезается, а упоминания в ней подставляются именами', () => {
+    const reply = makeReply({ ...quote, body: `@{mention:m1} ${'а'.repeat(500)}` });
+    const quoted = reply['payload'] as Record<string, unknown>;
+    quoted['mentions'] = [
+      { mention_type: 'user', mention_id: 'm1', mention_data: { conn_type: 'cts', user_huid: PEER_HUID, name: 'Коллега' } },
+    ];
+    const preview = normalizeEvent(rawEvent(), { inner: innerWith(reply) })?.reply_to?.text_preview;
+
+    expect(preview?.startsWith('@Коллега ')).toBe(true);
+    expect(preview).toHaveLength(REPLY_PREVIEW_MAX_LENGTH);
+    expect(preview?.endsWith('…')).toBe(true);
+  });
+
+  it('без reply ключа reply_to нет вовсе', () => {
+    const inner = makeInnerText({
+      msgId: '5b2c8e10-7d44-4c1a-8f9b-2a6e0c3d5f81',
+      from: MY_HUID,
+      timestamp: '2026-09-08T07:14:29.000Z',
+      groupChatId: POLYGON_CHAT_ID,
+      body: MESSAGE_TEXT,
+    });
+
+    expect(Object.keys(normalizeEvent(rawEvent(), { inner }) ?? {})).not.toContain('reply_to');
+  });
+
+  it('битая и незнакомая форма связи не порождает ключ', () => {
+    const broken = [
+      'строка вместо объекта',
+      [makeReply(quote)],
+      { payload: { body: 'без адреса' } },
+      { ...makeReply(quote), sync_id: 42 },
+      { ...makeReply(quote), sync_id: 'не-uuid' },
+    ];
+    for (const reply of broken) {
+      const message = normalizeEvent(rawEvent(), { inner: innerWith(reply) });
+      expect(Object.keys(message ?? {})).not.toContain('reply_to');
+    }
+  });
+
+  it('цитата без автора, имени и текста даёт только адрес', () => {
+    const message = normalizeEvent(rawEvent(), {
+      inner: innerWith({ sync_id: QUOTED_ID, payload: 'не объект', source_name: '' }),
+    });
+
+    expect(message?.reply_to).toEqual({ message_id: QUOTED_ID });
   });
 });

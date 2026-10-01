@@ -27,7 +27,7 @@ import type { PhoenixClient } from '../transport/ws/types.js';
 import { asObject, stringOr } from '../util/json.js';
 import type { Logger } from '../util/logger.js';
 import { toIso } from '../util/timestamps.js';
-import type { ChatRecord } from './chatShape.js';
+import { PERSONAL_CHAT_TYPE, SELF_CHAT_TYPE, type ChatRecord } from './chatShape.js';
 import { chatTopic } from './history.js';
 
 /** Событие отправки на проводе */
@@ -68,6 +68,94 @@ export interface TextInnerEventInput {
   msgId: string;
   /** ISO-8601 */
   timestamp: string;
+  /** Связь ответа: есть только у ответа на сообщение, иначе ключа в событии нет вовсе */
+  reply?: ReplyLink;
+}
+
+/**
+ * Значения `reply_type`: тип ЧАТА-ИСТОЧНИКА цитаты. Живьём подтверждено: групповой чат даёт
+ * `group_chat` и канал `channel` (проба R1), чат с собой `chat` (живая отправка, клиент
+ * показал цитату). Личный чат как `chat` живьём НЕ проверен. В R1 встречалась и другая
+ * форма связи (`quote` и поля `file_*` в цитате), её этот код не производит.
+ */
+export type ReplyType = 'group_chat' | 'chat' | 'channel';
+
+/**
+ * Какие сообщения можно цитировать: только текст и ссылку, форма их цитаты снята. У файловых
+ * событий живьём тоже бывает `body`, но форма их цитаты не снята.
+ */
+const QUOTABLE_TYPES: readonly string[] = ['text', 'link'];
+
+const GROUP_CHAT_TYPE = 'group_chat';
+const CHANNEL_CHAT_TYPE = 'channel';
+
+/**
+ * Связь ответа во внутреннем событии в форме, снятой живой пробой R1. Цитата (`payload`)
+ * копирует цитируемое событие: живой клиент кладёт туда его тип, текст и автора, а при
+ * упоминаниях в цитате и сами `mentions`.
+ */
+export interface ReplyLink {
+  payload: {
+    type: string;
+    body: string;
+    from: string;
+    mentions?: unknown[];
+  };
+  sync_id: string;
+  sender_conn_type: 'cts';
+  reply_type: ReplyType;
+  source_name: string;
+  group_chat_id: string;
+}
+
+/**
+ * Тип чата в `reply_type`. Чат с собой (`notes`) отдельного значения не имеет и даёт `chat`,
+ * личный чат тоже `chat` (не проверено живьём). Незнакомый тип считается групповым: это самое
+ * частое значение в пробе.
+ */
+export function replyTypeOf(chatKind: string): ReplyType {
+  if (chatKind === PERSONAL_CHAT_TYPE || chatKind === SELF_CHAT_TYPE) {
+    return 'chat';
+  }
+  return chatKind === CHANNEL_CHAT_TYPE ? 'channel' : GROUP_CHAT_TYPE;
+}
+
+export interface ReplyLinkInput {
+  /** Расшифрованное внутреннее событие цитируемого сообщения */
+  quotedInner: Record<string, unknown>;
+  /** Отправитель цитируемого по внешнему событию: запасной, если во внутреннем его нет */
+  quotedSender?: string;
+  quotedMessageId: string;
+  chat: ChatRecord;
+  /** Имя автора цитаты; пустая строка, если справка его не назвала (так бывает и живьём) */
+  sourceName: string;
+}
+
+/**
+ * Связь ответа из цитируемого события. `undefined` означает, что цитату в снятой форме не
+ * собрать: событие не текст и не ссылка, либо у него нет текста или автора.
+ */
+export function buildReplyLink(input: ReplyLinkInput): ReplyLink | undefined {
+  const type = stringOr(input.quotedInner['type']);
+  const body = input.quotedInner['body'];
+  const from = stringOr(input.quotedInner['from']) ?? input.quotedSender;
+  if (
+    type === undefined ||
+    !QUOTABLE_TYPES.includes(type) ||
+    typeof body !== 'string' ||
+    from === undefined
+  ) {
+    return undefined;
+  }
+  const mentions = input.quotedInner['mentions'];
+  return {
+    payload: { type, body, from, ...(Array.isArray(mentions) ? { mentions } : {}) },
+    sync_id: input.quotedMessageId,
+    sender_conn_type: 'cts',
+    reply_type: replyTypeOf(input.chat.kind),
+    source_name: input.sourceName,
+    group_chat_id: input.chat.chat_id,
+  };
 }
 
 /**
@@ -76,6 +164,7 @@ export interface TextInnerEventInput {
  * Поля координат и флаги пересылки присутствуют ВСЕГДА и нулевыми: живой клиент шлёт
  * именно так, а состав полей внутреннего события входит в подписанный шифротекст, поэтому
  * «лишнее не отправлять» здесь означает отправить не то, что принято сервером в пробе.
+ * По той же причине `reply` появляется ТОЛЬКО у ответа: обычное сообщение уходит в прежней форме.
  */
 export function buildTextInnerEvent(input: TextInnerEventInput): Record<string, unknown> {
   return {
@@ -89,6 +178,7 @@ export function buildTextInnerEvent(input: TextInnerEventInput): Record<string, 
     link_meta_disabled: false,
     stealth_forwarding: false,
     body: input.text,
+    ...(input.reply !== undefined ? { reply: input.reply } : {}),
   };
 }
 
@@ -98,6 +188,8 @@ export interface BuildMessageNewInput {
   text: string;
   /** Идентификатор отправки, придуманный вызывающим на каждую отправку */
   syncId: string;
+  /** Связь ответа; без неё внутреннее событие собирается в прежней форме */
+  reply?: ReplyLink;
   deps: MutationDeps;
 }
 
@@ -144,6 +236,7 @@ export async function buildMessageNewRequest(
       /* Идентификатор сообщения свой: он не равен идентификатору отправки, это разные поля */
       msgId: createRequestId(),
       timestamp: toIso(new Date()),
+      ...(input.reply !== undefined ? { reply: input.reply } : {}),
     }),
     groupChatId: chat.chat_id,
     syncId: input.syncId,

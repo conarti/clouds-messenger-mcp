@@ -97,6 +97,11 @@ const THREAD_FIELD_NOTE =
   'thread_id равен message_id сообщения и годится для get_thread; replies_count это число ' +
   'ответов и отсутствует, если сервер его не отдал. У сообщений без треда поля нет.';
 
+/** Поле `reply_to` общее для всех инструментов чтения сообщений, как и `thread` */
+const REPLY_FIELD_NOTE =
+  ' Ответ на другое сообщение несёт поле reply_to: {message_id, from?, from_name?, text_preview?}; ' +
+  'message_id годится для get_message, text_preview это начало цитаты. У прочих сообщений поля нет.';
+
 export interface CreateServerOptions {
   config: Config;
   logger: Logger;
@@ -251,7 +256,8 @@ export function createServer(options: CreateServerOptions): McpServer {
         'и имя человека: личный чат резолвится по имени собеседника. Курсор before ' +
         'ИСКЛЮЧАЮЩИЙ: сообщение с этим идентификатором в выдачу не попадает. Фильтры по датам ' +
         'считаются на стороне сервера MCP и могут стоить нескольких вызовов истории.' +
-        THREAD_FIELD_NOTE,
+        THREAD_FIELD_NOTE +
+        REPLY_FIELD_NOTE,
       inputSchema: {
         chat: z
           .string()
@@ -301,7 +307,8 @@ export function createServer(options: CreateServerOptions): McpServer {
         'Одно сообщение по паре чат и message_id, без загрузки истории вокруг него. Путь адресного ' +
         'чтения подтверждён живой пробой; если сервер на него не ответит, сообщение будет найдено ' +
         'проходом по истории, и выдача от этого не изменится.' +
-        THREAD_FIELD_NOTE,
+        THREAD_FIELD_NOTE +
+        REPLY_FIELD_NOTE,
       inputSchema: {
         chat: z.string().min(1).describe('Идентификатор чата (UUID) либо запрос по имени'),
         message_id: z
@@ -322,7 +329,8 @@ export function createServer(options: CreateServerOptions): McpServer {
         'Окно вокруг сообщения: N сообщений до и N после. Стоит до трёх вызовов истории. ' +
         'Направление обхода вперёд подтверждено живой пробой, поэтому сторона «после» метки ' +
         'неподтверждённости не несёт.' +
-        THREAD_FIELD_NOTE,
+        THREAD_FIELD_NOTE +
+        REPLY_FIELD_NOTE,
       inputSchema: {
         chat: z.string().min(1).describe('Идентификатор чата (UUID) либо запрос по имени'),
         message_id: z.string().regex(UUID_PATTERN).describe('Идентификатор сообщения (UUID) в центре окна'),
@@ -358,7 +366,8 @@ export function createServer(options: CreateServerOptions): McpServer {
         'справкой о треде; source:"direct" означает, что тред найден справкой, а не в списке, ' +
         'participant говорит, участник ли пользователь. Чтение участие не меняет. Стоит три-четыре ' +
         'вызова к серверу (список чатов, список тредов, при промахе справка о треде, страница треда).' +
-        THREAD_FIELD_NOTE,
+        THREAD_FIELD_NOTE +
+        REPLY_FIELD_NOTE,
       inputSchema: {
         chat: z
           .string()
@@ -486,7 +495,7 @@ export function createServer(options: CreateServerOptions): McpServer {
         'вызовом получите явное согласие пользователя на адресата и текст. Повтор вызова ' +
         'создаёт ВТОРОЕ сообщение: если ответ потерян, сначала проверьте get_history. Неоднозначный или незнакомый чат ничего не отправляет и ' +
         'отвечает статусом ambiguous_chat с кандидатами или chat_not_found. Успех отвечает ' +
-        'status:"sent" с chat_id, chat_name, message_id и inserted_at.',
+        'status:"sent" с chat_id, chat_name, message_id и inserted_at, у ответа ещё и reply_to.',
       inputSchema: {
         chat: z
           .string()
@@ -497,6 +506,15 @@ export function createServer(options: CreateServerOptions): McpServer {
           .min(1)
           .max(TEXT_MAX_LENGTH)
           .describe(`Текст сообщения, до ${TEXT_MAX_LENGTH} символов`),
+        reply_to: z
+          .string()
+          .regex(UUID_PATTERN)
+          .optional()
+          .describe(
+            'Ответить на сообщение: его message_id (UUID) из выдачи get_history этого же чата. ' +
+              'Цитата собирается из самого сообщения. Ненайденное сообщение ничего не отправляет ' +
+              'и отвечает статусом reply_target_not_found',
+          ),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     },

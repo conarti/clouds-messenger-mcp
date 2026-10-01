@@ -30,6 +30,7 @@ import { makeKeyRing, type KeyRing } from '../helpers/cryptoFixtures.js';
 import {
   MY_HUID,
   OTHER_CHAT_ID,
+  PEER_HUID,
   POLYGON_CHAT_ID,
   makeHistoryEvent,
   makeInnerImage,
@@ -58,6 +59,21 @@ const REGISTERED_TOOLS = [
 function eventTime(index: number): string {
   return `2026-09-08T07:0${index}:00.000Z`;
 }
+
+/** Второе сообщение это ответ на первое: цитата в форме живой пробы R1 */
+const QUOTE = {
+  syncId: syncId(1),
+  from: PEER_HUID,
+  body: 'первое сообщение',
+  sourceName: 'Синтетический Автор',
+  groupChatId: POLYGON_CHAT_ID,
+};
+const EXPECTED_REPLY = {
+  message_id: syncId(1),
+  from: PEER_HUID,
+  from_name: 'Синтетический Автор',
+  text_preview: 'первое сообщение',
+};
 
 let ring: KeyRing;
 let server: ToolServer;
@@ -118,6 +134,7 @@ async function buildHistory(): Promise<Record<string, unknown>[]> {
         timestamp: eventTime(2),
         groupChatId: POLYGON_CHAT_ID,
         body: 'второе сообщение',
+        reply: QUOTE,
       }),
     }),
     await makeHistoryEvent({
@@ -346,9 +363,33 @@ describe('get_history', () => {
 
     expect(payload.messages.map((message) => message.message_id)).toEqual([syncId(1), syncId(2)]);
   });
+
+  it('ответ несёт reply_to, а прочие сообщения ключа не имеют вовсе', async () => {
+    const payload = await server.callTool<GetHistoryResult>('get_history', { chat: 'Избранное', limit: 5 });
+    if (payload.status !== 'ok') {
+      throw new Error('ожидалась успешная выдача');
+    }
+
+    expect(payload.messages[1]?.reply_to).toEqual(EXPECTED_REPLY);
+    for (const message of payload.messages.filter((entry) => entry.message_id !== syncId(2))) {
+      expect(Object.keys(message)).not.toContain('reply_to');
+    }
+  });
 });
 
 describe('get_message', () => {
+  it('ответ читается с reply_to', async () => {
+    const payload = await server.callTool<GetMessageResult>('get_message', {
+      chat: 'Избранное',
+      message_id: syncId(2),
+    });
+    if (payload.status !== 'ok') {
+      throw new Error('ожидалась успешная выдача');
+    }
+
+    expect(payload.message.reply_to).toEqual(EXPECTED_REPLY);
+  });
+
   it('читает сообщение адресным событием и меток неподтверждённости не ставит', async () => {
     const payload = await server.callTool<GetMessageResult>('get_message', {
       chat: 'Избранное',

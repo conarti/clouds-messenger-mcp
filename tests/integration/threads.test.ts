@@ -92,6 +92,13 @@ async function buildThreadEvents(threadId: string): Promise<Record<string, unkno
         timestamp: '2026-09-08T07:02:00.000Z',
         groupChatId: threadId,
         body: 'второй ответ в треде',
+        reply: {
+          syncId: syncId(1),
+          from: MY_HUID,
+          body: 'первый ответ в треде',
+          sourceName: 'Синтетический Автор',
+          groupChatId: threadId,
+        },
       }),
     }),
   ];
@@ -169,6 +176,13 @@ describe('get_thread по готовому адресу треда', () => {
     /* Сообщение треда адресуется самим тредом, а имя чата в нём это имя РОДИТЕЛЬСКОГО чата */
     expect(payload.messages[0]?.chat_id).toBe(THREAD_ID);
     expect(payload.messages[0]?.chat_name).toBe('Избранное');
+    expect(Object.keys(payload.messages[0] ?? {})).not.toContain('reply_to');
+    expect(payload.messages[1]?.reply_to).toEqual({
+      message_id: syncId(1),
+      from: MY_HUID,
+      from_name: 'Синтетический Автор',
+      text_preview: 'первый ответ в треде',
+    });
     expect(payload.has_more).toBe(false);
     expect(Object.keys(payload)).not.toContain('form_status');
     expect(payload.next_before).toBe(syncId(1));

@@ -48,6 +48,23 @@ export interface MessageThread {
 }
 
 /**
+ * Связь ответа: на какое сообщение отвечает это. Берётся из `reply` ВНУТРЕННЕГО события
+ * (снято живой пробой R1): адрес цитируемого, его автор и начало цитаты.
+ */
+export interface ReplyRef {
+  message_id: string;
+  /** huid автора цитируемого сообщения */
+  from?: string;
+  /** Имя автора цитаты в том виде, в каком его записал отправитель ответа */
+  from_name?: string;
+  /** Начало текста цитаты: полный текст читается через get_message по message_id */
+  text_preview?: string;
+}
+
+/** Потолок длины цитаты в выдаче вместе с многоточием: цитата служит опознанию, а не повтору */
+export const REPLY_PREVIEW_MAX_LENGTH = 200;
+
+/**
  * Признак стартового сообщения треда во ВНЕШНЕМ (нешифрованном) `meta`. Живьём ключ либо
  * `true`, либо отсутствует; счётчика ответов рядом нет.
  */
@@ -86,6 +103,8 @@ export interface Message {
   read_by_count?: number;
   /** Есть, только если от сообщения начат тред */
   thread?: MessageThread;
+  /** Есть, только если сообщение это ответ на другое */
+  reply_to?: ReplyRef;
   /** Текст отказа расшифровки с тегом слоя; сообщение при этом остаётся в выдаче */
   decrypt_error?: string;
 }
@@ -166,6 +185,35 @@ function linkOf(inner: Record<string, unknown> | undefined): MessageLink | undef
   return url === undefined ? undefined : { url };
 }
 
+function previewOf(text: string): string {
+  return text.length <= REPLY_PREVIEW_MAX_LENGTH
+    ? text
+    : `${text.slice(0, REPLY_PREVIEW_MAX_LENGTH - 1)}…`;
+}
+
+/**
+ * Связь ответа из `inner.reply`. Без адреса в форме UUID связи нет: незнакомая форма
+ * означает отсутствие ключа, а не выдуманную ссылку на сообщение, которого может не быть.
+ */
+function replyOf(inner: Record<string, unknown> | undefined): ReplyRef | undefined {
+  const reply = asObject(inner?.['reply']);
+  const messageId = stringOr(reply?.['sync_id']);
+  if (reply === undefined || messageId === undefined || !UUID_PATTERN.test(messageId)) {
+    return undefined;
+  }
+  const quoted = asObject(reply['payload']);
+  const from = stringOr(quoted?.['from']);
+  const fromName = stringOr(reply['source_name']);
+  const body = stringOr(quoted?.['body']);
+  const text = body === undefined ? undefined : applyMentions(body, parseMentions(quoted).names);
+  return {
+    message_id: messageId,
+    ...(from !== undefined ? { from } : {}),
+    ...(fromName !== undefined ? { from_name: fromName } : {}),
+    ...(text !== undefined ? { text_preview: previewOf(text) } : {}),
+  };
+}
+
 /**
  * Внешнее событие плюс расшифрованное внутреннее в единую форму.
  *
@@ -200,6 +248,7 @@ export function normalizeEvent(rawEvent: unknown, decrypted?: DecryptedPart): Me
   const readBy = event['read_by'];
   const readByCount = Array.isArray(readBy) ? readBy.length : undefined;
   const threadStarted = asObject(event['meta'])?.[THREAD_STARTED_FIELD] === true;
+  const replyTo = replyOf(inner);
 
   return {
     message_id: messageId,
@@ -215,6 +264,7 @@ export function normalizeEvent(rawEvent: unknown, decrypted?: DecryptedPart): Me
     ...(reactions.length > 0 ? { reactions } : {}),
     ...(readByCount !== undefined ? { read_by_count: readByCount } : {}),
     ...(threadStarted ? { thread: { thread_id: messageId } } : {}),
+    ...(replyTo !== undefined ? { reply_to: replyTo } : {}),
     ...(decrypted?.error !== undefined ? { decrypt_error: decrypted.error } : {}),
   };
 }

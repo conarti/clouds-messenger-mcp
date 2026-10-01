@@ -81,6 +81,27 @@ function makeMentions(mentions: readonly MentionFixture[]): Record<string, unkno
   }));
 }
 
+/** Цитата ответа: форма снята живой пробой R1 */
+export interface ReplyFixture {
+  syncId: string;
+  from: string;
+  body: string;
+  sourceName: string;
+  groupChatId: string;
+  replyType?: string;
+}
+
+export function makeReply(reply: ReplyFixture): Record<string, unknown> {
+  return {
+    payload: { type: 'text', body: reply.body, from: reply.from },
+    sync_id: reply.syncId,
+    sender_conn_type: 'cts',
+    reply_type: reply.replyType ?? 'group_chat',
+    source_name: reply.sourceName,
+    group_chat_id: reply.groupChatId,
+  };
+}
+
 export function makeInnerText(input: {
   msgId: string;
   from: string;
@@ -88,6 +109,7 @@ export function makeInnerText(input: {
   groupChatId: string;
   body: string;
   mentions?: readonly MentionFixture[];
+  reply?: ReplyFixture;
 }): Record<string, unknown> {
   return {
     type: 'text',
@@ -101,6 +123,7 @@ export function makeInnerText(input: {
     stealth_forwarding: false,
     body: input.body,
     ...(input.mentions !== undefined ? { mentions: makeMentions(input.mentions) } : {}),
+    ...(input.reply !== undefined ? { reply: makeReply(input.reply) } : {}),
   };
 }
 

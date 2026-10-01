@@ -1,7 +1,18 @@
 import { readFileSync } from 'node:fs';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
+import type {
+  CallToolResult,
+  ServerNotification,
+  ServerRequest,
+} from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
+import {
+  browserInstallInProgress,
+  browserUnavailable,
+  type ChromiumInstallation,
+  type InstallWaitResult,
+} from './auth/chromiumInstall.js';
 import type { Config } from './config/types.js';
 import { downloadAttachment } from './mcp/tools/downloadAttachment.js';
 import { getHistory } from './mcp/tools/getHistory.js';
@@ -90,7 +101,11 @@ export interface CreateServerOptions {
   logger: Logger;
   /** Транспорты, авторизация и крипто: без них не работает ни один инструмент */
   deps: ToolDeps;
+  /** Фоновая установка Chromium; без неё инструменты не ждут браузер */
+  browserInstall?: Pick<ChromiumInstallation, 'waitFor' | 'onProgress' | 'currentProgress' | 'failure'>;
 }
+
+type ToolExtra = RequestHandlerExtra<ServerRequest, ServerNotification>;
 
 /** Успешный результат: структурный JSON, его потребитель тут машина, а не человек */
 function jsonResult(payload: unknown): CallToolResult {
@@ -123,11 +138,74 @@ function errorResult(tool: string, error: unknown, logger: Logger): CallToolResu
  * не подставляет лимит наугад «на всякий случай».
  */
 export function createServer(options: CreateServerOptions): McpServer {
-  const { config, logger, deps } = options;
+  const { config, logger, deps, browserInstall } = options;
   const server = new McpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },
     { capabilities: { tools: { listChanged: true } } },
   );
+
+  /**
+   * ОДНО МЕСТО НА ВСЕ ИНСТРУМЕНТЫ: каждому из них на первом вызове нужен вход через браузер.
+   * Идущая установка ждётся в пределах бюджета, а не до конца: иначе вызов оборвал бы
+   * таймаут клиента, и загрузка выглядела бы сломанной авторизацией. Отказ установки
+   * отдаётся отказом авторизации с командой ручной установки, а не сырой ошибкой запуска.
+   *
+   * Уведомления о прогрессе уходят, только если клиент прислал токен прогресса: без него
+   * слать их некуда, и прогресс остаётся в логе stderr.
+   */
+  const awaitBrowser = async (tool: string, extra: ToolExtra): Promise<CallToolResult | undefined> => {
+    if (browserInstall === undefined) {
+      return undefined;
+    }
+    const progressToken = extra._meta?.progressToken;
+    const unsubscribe = browserInstall.onProgress((progress) => {
+      if (progressToken === undefined) {
+        return;
+      }
+      extra
+        .sendNotification({
+          method: 'notifications/progress',
+          params: {
+            progressToken,
+            progress: progress.percent,
+            total: 100,
+            message: `загрузка Chromium: ${progress.percent}% из ${progress.total}`,
+          },
+        })
+        .catch(() => {
+          /* Клиент мог уйти: потерянное уведомление о прогрессе не повод ронять вызов */
+        });
+    });
+    let outcome: InstallWaitResult;
+    try {
+      outcome = await browserInstall.waitFor(config.auth.browserInstallWaitMs);
+    } finally {
+      unsubscribe();
+    }
+    if (outcome === 'pending') {
+      return jsonResult(browserInstallInProgress(browserInstall.currentProgress));
+    }
+    const failure = browserInstall.failure;
+    if (outcome === 'failed' && failure !== undefined) {
+      return errorResult(tool, browserUnavailable(failure), logger);
+    }
+    return undefined;
+  };
+
+  /** Обёртка обработчика: ожидание браузера, затем вызов, ошибка в форму MCP с тегом слоя */
+  const withBrowser =
+    <Args>(tool: string, call: (args: Args) => Promise<unknown>) =>
+    async (args: Args, extra: ToolExtra): Promise<CallToolResult> => {
+      const waiting = await awaitBrowser(tool, extra);
+      if (waiting !== undefined) {
+        return waiting;
+      }
+      try {
+        return jsonResult(await call(args));
+      } catch (error) {
+        return errorResult(tool, error, logger);
+      }
+    };
 
   server.registerTool(
     'list_chats',
@@ -160,13 +238,7 @@ export function createServer(options: CreateServerOptions): McpServer {
       },
       annotations: { readOnlyHint: true },
     },
-    async (args) => {
-      try {
-        return jsonResult(await listChats(deps, args));
-      } catch (error) {
-        return errorResult('list_chats', error, logger);
-      }
-    },
+    withBrowser('list_chats', (args) => listChats(deps, args)),
   );
 
   server.registerTool(
@@ -217,13 +289,7 @@ export function createServer(options: CreateServerOptions): McpServer {
       },
       annotations: { readOnlyHint: true },
     },
-    async (args) => {
-      try {
-        return jsonResult(await getHistory(deps, args));
-      } catch (error) {
-        return errorResult('get_history', error, logger);
-      }
-    },
+    withBrowser('get_history', (args) => getHistory(deps, args)),
   );
 
   server.registerTool(
@@ -244,13 +310,7 @@ export function createServer(options: CreateServerOptions): McpServer {
       },
       annotations: { readOnlyHint: true },
     },
-    async (args) => {
-      try {
-        return jsonResult(await getMessage(deps, args));
-      } catch (error) {
-        return errorResult('get_message', error, logger);
-      }
-    },
+    withBrowser('get_message', (args) => getMessage(deps, args)),
   );
 
   server.registerTool(
@@ -282,13 +342,7 @@ export function createServer(options: CreateServerOptions): McpServer {
       },
       annotations: { readOnlyHint: true },
     },
-    async (args) => {
-      try {
-        return jsonResult(await getMessageContext(deps, args));
-      } catch (error) {
-        return errorResult('get_message_context', error, logger);
-      }
-    },
+    withBrowser('get_message_context', (args) => getMessageContext(deps, args)),
   );
 
   server.registerTool(
@@ -337,13 +391,7 @@ export function createServer(options: CreateServerOptions): McpServer {
       },
       annotations: { readOnlyHint: true },
     },
-    async (args) => {
-      try {
-        return jsonResult(await getThread(deps, args));
-      } catch (error) {
-        return errorResult('get_thread', error, logger);
-      }
-    },
+    withBrowser('get_thread', (args) => getThread(deps, args)),
   );
 
   server.registerTool(
@@ -364,13 +412,7 @@ export function createServer(options: CreateServerOptions): McpServer {
       },
       annotations: { readOnlyHint: true },
     },
-    async (args) => {
-      try {
-        return jsonResult(await listReactions(deps, args));
-      } catch (error) {
-        return errorResult('list_reactions', error, logger);
-      }
-    },
+    withBrowser('list_reactions', (args) => listReactions(deps, args)),
   );
 
   server.registerTool(
@@ -393,13 +435,7 @@ export function createServer(options: CreateServerOptions): McpServer {
       },
       annotations: { readOnlyHint: true },
     },
-    async (args) => {
-      try {
-        return jsonResult(await getPoll(deps, args));
-      } catch (error) {
-        return errorResult('get_poll', error, logger);
-      }
-    },
+    withBrowser('get_poll', (args) => getPoll(deps, args)),
   );
 
   server.registerTool(
@@ -431,22 +467,14 @@ export function createServer(options: CreateServerOptions): McpServer {
       },
       annotations: { readOnlyHint: false, idempotentHint: false },
     },
-    async (args) => {
-      try {
-        return jsonResult(await downloadAttachment(deps, args));
-      } catch (error) {
-        return errorResult('download_attachment', error, logger);
-      }
-    },
+    withBrowser('download_attachment', (args) => downloadAttachment(deps, args)),
   );
 
-  server.registerTool('search', SEARCH_TOOL_DEFINITION, async (args) => {
-    try {
-      return jsonResult(await search(deps, args));
-    } catch (error) {
-      return errorResult('search', error, logger);
-    }
-  });
+  server.registerTool(
+    'search',
+    SEARCH_TOOL_DEFINITION,
+    withBrowser('search', (args) => search(deps, args)),
+  );
 
   server.registerTool(
     'send_message',
@@ -485,13 +513,7 @@ export function createServer(options: CreateServerOptions): McpServer {
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     },
-    async (args) => {
-      try {
-        return jsonResult(await sendMessage(deps, args));
-      } catch (error) {
-        return errorResult('send_message', error, logger);
-      }
-    },
+    withBrowser('send_message', (args) => sendMessage(deps, args)),
   );
 
   return server;

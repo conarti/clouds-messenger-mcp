@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { sweepDownloads } from './attachments/cleanup.js';
+import { ChromiumInstallation } from './auth/chromiumInstall.js';
 import { AuthKeyStore } from './auth/keyStore.js';
 import { PlaywrightProfileAuth } from './auth/PlaywrightProfileAuth.js';
 import { loadConfig } from './config/loadConfig.js';
 import { SodiumCryptoService } from './crypto/service.js';
 import { createServer } from './server.js';
+import { createShutdown } from './shutdown.js';
 import { HttpRestClient } from './transport/RestClient.js';
 import { PhoenixWsClient } from './transport/ws/PhoenixClient.js';
 import { createLogger } from './util/logger.js';
@@ -43,7 +45,17 @@ async function main(): Promise<void> {
    * читается. Авторизация случится лениво, на первом вызове инструмента, который реально
    * идёт к серверу: `tools/list` обязан отвечать и без живой сессии.
    */
-  const auth = new PlaywrightProfileAuth({ config, logger });
+  const browserInstall = new ChromiumInstallation({
+    timeoutMs: config.auth.browserInstallTimeoutMs,
+    logger,
+  });
+  const auth = new PlaywrightProfileAuth({ config, logger, ensureBrowser: () => browserInstall.ensure() });
+  /*
+   * Установка браузера стартует сразу и БЕЗ ожидания: сборка сервера обязана остаться без
+   * ожидания ввода-вывода, а загрузка в 150 МБ успеет пройти, пока клиент читает список
+   * инструментов. Исход оседает внутри установки, поэтому отказ здесь некому терять.
+   */
+  void browserInstall.start();
   const ws = new PhoenixWsClient({ auth, config, logger });
   const rest = new HttpRestClient({ auth, config, logger });
   const crypto = new SodiumCryptoService({ rest, logger });
@@ -53,6 +65,7 @@ async function main(): Promise<void> {
     config,
     logger,
     deps: { ws, rest, auth, crypto, keyStore, config, logger },
+    browserInstall,
   });
   const transport = new StdioServerTransport();
 
@@ -75,24 +88,12 @@ async function main(): Promise<void> {
    * SIGTERM -> 143), чтобы отличить смерть по сигналу от обычного завершения и решить,
    * перезапускать ли процесс.
    */
-  let stopping = false;
-  const shutdown = (reason: string, exitCode: number): void => {
-    if (stopping) {
-      return;
-    }
-    stopping = true;
-    logger.info('остановка сервера MCP', { reason });
-    void ws
-      .close()
-      .catch((error: unknown) => {
-        logger.warn('сокет не закрылся штатно', {
-          error: error instanceof Error ? error.message : String(error),
-        });
-      })
-      .finally(() => {
-        process.exit(exitCode);
-      });
-  };
+  const shutdown = createShutdown({
+    ws,
+    browserInstall,
+    logger,
+    exit: (exitCode) => process.exit(exitCode),
+  });
 
   transport.onclose = () => shutdown('транспорт stdio закрыт', 0);
   process.on('SIGINT', () => shutdown('SIGINT', 130));

@@ -63,6 +63,10 @@ export const DEFAULT_LIMITS: LimitsConfig = {
 export const DEFAULT_AUTH: AuthConfig = {
   headlessTimeoutMs: 30_000,
   headedTimeoutMs: 300_000,
+  /* 10 минут: архив около 150 МБ, а корпоративный канал бывает узким */
+  browserInstallTimeoutMs: 600_000,
+  /* Минута: заметно короче таймаута клиента и достаточно, чтобы быстрый канал успел докачать */
+  browserInstallWaitMs: 60_000,
 };
 
 export const DEFAULT_WS: WsConfig = {

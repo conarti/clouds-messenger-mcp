@@ -7,7 +7,7 @@
  * должно проверяться: сколько раз поднят профиль, с каким флагом, с каким бюджетом,
  * закрыт ли контекст и что именно уехало в снимок.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { AuthError } from '../../src/auth/AuthProvider.js';
 import {
   PlaywrightProfileAuth,
@@ -548,5 +548,73 @@ describe('второй запуск не требует ручного вход�
     /* Оба подъёма headless: окно с ручным входом второй раз не понадобилось */
     expect(browser.launches.every((launch) => launch.headless)).toBe(true);
     expect(browser.closeCalls).toBe(2);
+  });
+});
+
+describe('браузер ставится до запуска', () => {
+  it('попытка не поднимает профиль, пока ensureBrowser не резолвился', async () => {
+    const browser = new FakeBrowser({ headless: sessionScenario(), headed: emptyScenario() });
+    let finishInstall: () => void = () => undefined;
+    const ensureBrowser = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishInstall = resolve;
+        }),
+    );
+    const source = new PlaywrightProfileSource({
+      config: testConfig(),
+      logger: recordingLogger([]),
+      launchContext: browser.launchContext,
+      ensureBrowser,
+    });
+
+    const loading = source.load();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(ensureBrowser).toHaveBeenCalledTimes(1);
+    expect(browser.launches).toEqual([]);
+
+    finishInstall();
+    await loading;
+    expect(browser.launches).toHaveLength(1);
+  });
+
+  it('отказ установки уезжает наружу отказом авторизации с причиной', async () => {
+    const browser = new FakeBrowser({ headless: sessionScenario(), headed: emptyScenario() });
+    const installFailure = new Error('Chromium не установлен: npx playwright@1.63.0 install chromium');
+    const source = new PlaywrightProfileSource({
+      config: testConfig(),
+      logger: recordingLogger([]),
+      launchContext: browser.launchContext,
+      ensureBrowser: async () => {
+        throw installFailure;
+      },
+    });
+
+    const error = await source.load().catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(AuthError);
+    expect((error as AuthError).message).toContain('npx playwright@1.63.0 install chromium');
+    expect((error as AuthError).cause).toBe(installFailure);
+    expect(browser.launches).toEqual([]);
+  });
+
+  it('сырое «Executable doesn\'t exist» из запуска становится отказом авторизации с командой', async () => {
+    const rawFailure = new Error(
+      "browserType.launchPersistentContext: Executable doesn't exist at /cache/chromium_headless_shell-1243/shell",
+    );
+    const source = new PlaywrightProfileSource({
+      config: testConfig(),
+      logger: recordingLogger([]),
+      launchContext: async () => {
+        throw rawFailure;
+      },
+    });
+
+    const error = await source.load().catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(AuthError);
+    expect((error as AuthError).message).toMatch(/npx playwright@\d+\.\d+\.\d+ install chromium/);
+    expect((error as AuthError).message).not.toContain("Executable doesn't exist");
   });
 });

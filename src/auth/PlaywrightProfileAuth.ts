@@ -13,6 +13,7 @@ import type { Config } from '../config/types.js';
 import { AUTHENTICATE_EVENT } from '../config/wireEvents.js';
 import { asObject, stringOr } from '../util/json.js';
 import type { Logger } from '../util/logger.js';
+import { browserUnavailable, isMissingExecutableError } from './chromiumInstall.js';
 import { AuthError, type AuthProvider, type KeyMaterial, type Whoami } from './AuthProvider.js';
 import type { ProfileSession, ProfileSessionSource } from './ProfileSessionSource.js';
 import {
@@ -216,6 +217,11 @@ export interface PlaywrightProfileSourceOptions {
   logger: Logger;
   /** Подменяется в тестах: подложный контекст доказывает эскалацию входа без браузера */
   launchContext?: LaunchProfileContext;
+  /**
+   * Дожидается сборки Chromium перед запуском. Без неё отсутствующий браузер выглядел бы
+   * сырым `Executable doesn't exist` из Playwright вместо внятного отказа авторизации.
+   */
+  ensureBrowser?: () => Promise<void>;
 }
 
 /**
@@ -273,7 +279,16 @@ export class PlaywrightProfileSource implements ProfileSessionSource {
   private async attempt(headless: boolean, timeoutMs: number): Promise<AttemptResult> {
     const { config, logger } = this.options;
     const launch = this.options.launchContext ?? launchPersistentProfileContext;
-    const context = await launch({ profileDir: config.paths.profileDir, headless });
+    await this.ensureBrowser();
+    const context = await launch({ profileDir: config.paths.profileDir, headless }).catch(
+      (error: unknown) => {
+        /* Сырое «Executable doesn't exist» наружу не уходит: вместо него команда ручной установки */
+        if (isMissingExecutableError(error)) {
+          throw browserUnavailable(error);
+        }
+        throw error;
+      },
+    );
 
     try {
       const page = context.pages()[0] ?? (await context.newPage());
@@ -436,6 +451,18 @@ export class PlaywrightProfileSource implements ProfileSessionSource {
     }
   }
 
+  private async ensureBrowser(): Promise<void> {
+    const { ensureBrowser } = this.options;
+    if (ensureBrowser === undefined) {
+      return;
+    }
+    try {
+      await ensureBrowser();
+    } catch (error) {
+      throw browserUnavailable(error);
+    }
+  }
+
   /**
    * Хосты, чьи cookie уезжают на сервер. Собираются из конфига, а не зашиты: веб-клиент и
    * cts-хост это разные имена, и в белом списке обязаны быть оба.
@@ -459,6 +486,8 @@ export interface PlaywrightProfileAuthOptions {
   logger: Logger;
   /** Подменяется в тестах: подложный источник доказывает схлопывание без браузера */
   source?: ProfileSessionSource;
+  /** Уезжает в источник по умолчанию: объявленная только у источника, до боевой сборки не доехала бы */
+  ensureBrowser?: () => Promise<void>;
 }
 
 /**
@@ -484,7 +513,12 @@ export class PlaywrightProfileAuth implements AuthProvider {
 
   constructor(private readonly options: PlaywrightProfileAuthOptions) {
     this.source =
-      options.source ?? new PlaywrightProfileSource({ config: options.config, logger: options.logger });
+      options.source ??
+      new PlaywrightProfileSource({
+        config: options.config,
+        logger: options.logger,
+        ...(options.ensureBrowser !== undefined ? { ensureBrowser: options.ensureBrowser } : {}),
+      });
   }
 
   async getBearer(forceRefresh = false): Promise<string> {

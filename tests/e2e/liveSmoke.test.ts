@@ -18,6 +18,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { PlaywrightProfileAuth } from '../../src/auth/PlaywrightProfileAuth.js';
+import { ChromiumInstallation } from '../../src/auth/chromiumInstall.js';
 import { AuthKeyStore } from '../../src/auth/keyStore.js';
 import { loadConfig } from '../../src/config/loadConfig.js';
 import { SodiumCryptoService } from '../../src/crypto/service.js';
@@ -128,7 +129,11 @@ describe.runIf(process.env[E2E_ENV] === '1')(
 
       const config = loadConfig({ paths: { profileDir } });
       const logger = createLogger({ level: 'error' });
-      const auth = new PlaywrightProfileAuth({ config, logger });
+      const browserInstall = new ChromiumInstallation({
+        timeoutMs: config.auth.browserInstallTimeoutMs,
+        logger,
+      });
+      const auth = new PlaywrightProfileAuth({ config, logger, ensureBrowser: () => browserInstall.ensure() });
       ws = new PhoenixWsClient({ auth, config, logger });
       const rest = new HttpRestClient({ auth, config, logger });
       const crypto = new SodiumCryptoService({ rest, logger });

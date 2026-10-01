@@ -73,6 +73,13 @@ export interface AuthConfig {
   headlessTimeoutMs: number;
   /** Бюджет headed-входа: столько времени даётся человеку на ручной вход */
   headedTimeoutMs: number;
+  /** Общий срок фоновой установки Chromium: по истечении процесс установки убивается */
+  browserInstallTimeoutMs: number;
+  /**
+   * Сколько один вызов инструмента ждёт идущую установку Chromium, прежде чем вернуть
+   * статус `browser_install_in_progress`: молчаливое ожидание оборвал бы таймаут клиента
+   */
+  browserInstallWaitMs: number;
 }
 
 export interface WsConfig {

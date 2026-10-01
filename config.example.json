@@ -30,7 +30,9 @@
   },
   "auth": {
     "headlessTimeoutMs": 30000,
-    "headedTimeoutMs": 300000
+    "headedTimeoutMs": 300000,
+    "browserInstallTimeoutMs": 600000,
+    "browserInstallWaitMs": 60000
   },
   "ws": {
     "authenticateTimeoutMs": 10000,

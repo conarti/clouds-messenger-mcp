@@ -81,8 +81,9 @@ export class AuthError extends Error {
   constructor(
     message: string,
     readonly kind: 'bearer' | 'protocol',
+    options?: ErrorOptions,
   ) {
-    super(message);
+    super(message, options);
     this.name = 'AuthError';
   }
 }

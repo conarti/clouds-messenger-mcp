@@ -41,7 +41,7 @@ import { createTestConfig } from '../helpers/testConfig.js';
 import { startToolServer, type ToolServer } from '../helpers/toolServer.js';
 
 const THIRD_CHAT_ID = '7f1c2d3e-4a5b-4c6d-8e9f-0a1b2c3d4e5f';
-/** Инструменты, зарегистрированные на сегодня: девять читающих плюс двухшаговая отправка */
+/** Инструменты, зарегистрированные на сегодня: девять читающих плюс необратимая отправка */
 const REGISTERED_TOOLS = [
   'list_chats',
   'get_history',
